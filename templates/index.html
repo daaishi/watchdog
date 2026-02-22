@@ -203,8 +203,9 @@
           <input type="text" id="f-exe" placeholder="C:\\Program Files\\...\\app.exe">
         </div>
         <div class="full">
-          <label for="f-args">Arguments (1 line per argument)</label>
-          <textarea id="f-args" rows="2" placeholder="C:\\Projects\\main.toe" style="width:100%;padding:8px 10px;background:#0f1923;border:1px solid #2a3e50;border-radius:4px;color:#e0e0e0;font-size:14px;font-family:inherit;outline:none;resize:vertical;"></textarea>
+          <label for="f-args">Arguments (use "quotes" for paths with spaces)</label>
+          <input type="text" id="f-args" placeholder='e.g. "C:\\My Projects\\main.toe" --verbose'>
+          <div class="hint">Example: "C:\path with spaces\file.toe" --flag value</div>
         </div>
         <div>
           <label for="f-method">Watch Method</label>
@@ -283,6 +284,33 @@
     const $ = (sel) => document.querySelector(sel);
     const methodMap = {udp:'UDP', process:'Process', file:'File', http:'HTTP', window:'Window'};
     const methodColorMap = {udp:'method-udp', process:'method-process', file:'method-file', http:'method-http', window:'method-window'};
+
+    // Parse a command-line style string: "path with spaces" arg2 arg3
+    function parseArgs(str) {
+      const s = (str || '').trim();
+      if (!s) return [];
+      const args = [];
+      let current = '';
+      let inQuote = false;
+      for (let i = 0; i < s.length; i++) {
+        const c = s[i];
+        if (c === '"') {
+          inQuote = !inQuote;
+        } else if (c === ' ' && !inQuote) {
+          if (current) { args.push(current); current = ''; }
+        } else {
+          current += c;
+        }
+      }
+      if (current) args.push(current);
+      return args;
+    }
+
+    // Format args array back to command-line style string
+    function formatArgs(args) {
+      if (!Array.isArray(args) || args.length === 0) return '';
+      return args.map(a => a.includes(' ') ? '"' + a + '"' : a).join(' ');
+    }
 
     function updateClock() {
       const now = new Date();
@@ -392,7 +420,7 @@
         id: $('#f-id').value.trim(),
         name: $('#f-name').value.trim(),
         exe_path: $('#f-exe').value.trim(),
-        args: $('#f-args').value.trim() ? $('#f-args').value.trim().split(/\n/).map(s => s.trim()).filter(s => s) : [],
+        args: parseArgs($('#f-args').value),
         use_shell_open: $('#f-shell').checked,
         watch_method: method,
         watch_config: watchConfig,
@@ -452,7 +480,7 @@
       $('#f-id').disabled = true;
       $('#f-name').value = app.Name;
       $('#f-exe').value = app.ExePath;
-      $('#f-args').value = Array.isArray(app.Args) ? app.Args.join('\n') : (app.Args || '');
+      $('#f-args').value = formatArgs(app.Args);
       $('#f-shell').checked = app.UseShellOpen;
       $('#f-method').value = app.WatchMethod || 'process';
       $('#f-timeout').value = app.TimeoutSec;
