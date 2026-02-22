@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	_ "embed"
 	"encoding/json"
 	"fmt"
 	"html/template"
@@ -19,6 +20,9 @@ import (
 	"time"
 	"unsafe"
 )
+
+//go:embed templates/index.html
+var embeddedTemplate string
 
 // ---------------------------------------------------------------------------
 // Windows API for window-title monitoring
@@ -145,8 +149,7 @@ func NewWatchdog(configPath string) (*Watchdog, error) {
 		return nil, fmt.Errorf("load config: %w", err)
 	}
 
-	tmplPath := filepath.Join(filepath.Dir(configPath), "templates", "index.html")
-	t, err := template.ParseFiles(tmplPath)
+	t, err := template.New("index.html").Parse(embeddedTemplate)
 	if err != nil {
 		return nil, fmt.Errorf("parse template: %w", err)
 	}
