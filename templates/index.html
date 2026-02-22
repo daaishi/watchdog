@@ -1,0 +1,529 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Watchdog - Process Monitor</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: "Segoe UI", "Meiryo", sans-serif;
+      background: #0f1923;
+      color: #e0e0e0;
+      min-height: 100vh;
+    }
+    header {
+      background: #1a2733;
+      border-bottom: 2px solid #2d9cdb;
+      padding: 16px 32px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    header h1 { font-size: 22px; font-weight: 600; color: #2d9cdb; }
+    header .clock { font-size: 14px; color: #8899aa; font-variant-numeric: tabular-nums; }
+    .container { max-width: 1200px; margin: 0 auto; padding: 24px 16px; }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-bottom: 24px;
+      background: #162029;
+      border-radius: 8px;
+      overflow: hidden;
+    }
+    th {
+      background: #1a2f3f;
+      text-align: left;
+      padding: 12px 14px;
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: #6b8da6;
+      border-bottom: 1px solid #253545;
+    }
+    td {
+      padding: 10px 14px;
+      font-size: 14px;
+      border-bottom: 1px solid #1e3040;
+      vertical-align: middle;
+    }
+    tr:last-child td { border-bottom: none; }
+    tr:hover td { background: #1a2f3f; }
+
+    .badge {
+      display: inline-block;
+      padding: 3px 10px;
+      border-radius: 12px;
+      font-size: 12px;
+      font-weight: 600;
+      text-transform: uppercase;
+    }
+    .badge-running  { background: #0d3b26; color: #34d399; }
+    .badge-stopped  { background: #3b1c1c; color: #f87171; }
+    .badge-starting { background: #3b3010; color: #fbbf24; }
+    .badge-disabled { background: #2a2a2a; color: #666; }
+
+    .method-badge {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 4px;
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .method-udp     { background: #1a3a4a; color: #5bb8f0; }
+    .method-process { background: #2a2a3a; color: #a78bfa; }
+    .method-file    { background: #2a3a2a; color: #6ee7b7; }
+    .method-http    { background: #3a2a1a; color: #fbbf24; }
+    .method-window  { background: #3a1a2a; color: #f472b6; }
+
+    .watch-detail { font-size: 11px; color: #6b8da6; display: block; margin-top: 2px; }
+    .pid { font-family: "Consolas", monospace; color: #7ec8e3; }
+
+    .actions button {
+      background: none;
+      border: 1px solid #3a5060;
+      color: #8899aa;
+      padding: 4px 10px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 12px;
+      margin-right: 4px;
+      transition: all 0.15s;
+    }
+    .actions button:hover { border-color: #2d9cdb; color: #2d9cdb; }
+    .actions .btn-delete:hover { border-color: #f87171; color: #f87171; }
+    .actions .btn-toggle-off:hover { border-color: #34d399; color: #34d399; }
+    .actions .btn-toggle-on { border-color: #fbbf24; color: #fbbf24; }
+    .actions .btn-toggle-on:hover { border-color: #f59e0b; color: #f59e0b; }
+    tr.row-disabled td { opacity: 0.45; }
+    tr.row-disabled td.actions { opacity: 1; }
+
+    .form-section {
+      background: #162029;
+      border-radius: 8px;
+      padding: 20px 24px;
+      margin-bottom: 24px;
+    }
+    .form-section h2 { font-size: 16px; margin-bottom: 16px; color: #2d9cdb; }
+    .form-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+    }
+    .form-grid .full { grid-column: 1 / -1; }
+    label { display: block; font-size: 12px; color: #6b8da6; margin-bottom: 4px; }
+    input[type="text"], input[type="number"], select {
+      width: 100%;
+      padding: 8px 10px;
+      background: #0f1923;
+      border: 1px solid #2a3e50;
+      border-radius: 4px;
+      color: #e0e0e0;
+      font-size: 14px;
+      outline: none;
+      transition: border 0.15s;
+    }
+    select option { background: #0f1923; color: #e0e0e0; }
+    input:focus, select:focus { border-color: #2d9cdb; }
+    .checkbox-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding-top: 20px;
+    }
+    .checkbox-row input[type="checkbox"] { accent-color: #2d9cdb; width: 16px; height: 16px; }
+    .form-actions { margin-top: 16px; display: flex; gap: 8px; }
+    .btn {
+      padding: 8px 20px;
+      border: none;
+      border-radius: 4px;
+      font-size: 14px;
+      cursor: pointer;
+      font-weight: 600;
+      transition: opacity 0.15s;
+    }
+    .btn:hover { opacity: 0.85; }
+    .btn-primary { background: #2d9cdb; color: #fff; }
+    .btn-secondary { background: #2a3e50; color: #e0e0e0; }
+    .btn-danger { background: #dc2626; color: #fff; }
+    .empty-msg { text-align: center; padding: 32px; color: #5a7080; }
+
+    .watch-fields { margin-top: 4px; }
+    .watch-fields .field-row { display: none; }
+    .watch-fields .field-row.active { display: block; }
+    .hint { font-size: 11px; color: #4a6a7a; margin-top: 2px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Watchdog Monitor</h1>
+    <div style="display:flex;align-items:center;gap:16px;">
+      <div class="clock" id="clock"></div>
+      <button class="btn btn-danger" onclick="shutdownWatchdog()">Shutdown</button>
+    </div>
+  </header>
+
+  <div class="container">
+    <table>
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>Name</th>
+          <th>Monitor</th>
+          <th>Watch Method</th>
+          <th>Start</th>
+          <th>Status</th>
+          <th>PID</th>
+          <th>Last Heartbeat</th>
+          <th>Timeout</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody id="status-body">
+        <tr><td colspan="10" class="empty-msg">Loading...</td></tr>
+      </tbody>
+    </table>
+
+    <div class="form-section">
+      <h2 id="form-title">Add New App</h2>
+      <div class="form-grid">
+        <div>
+          <label for="f-id">ID</label>
+          <input type="text" id="f-id" placeholder="e.g. td-main">
+        </div>
+        <div>
+          <label for="f-name">Name</label>
+          <input type="text" id="f-name" placeholder="e.g. TouchDesigner Main">
+        </div>
+        <div class="full">
+          <label for="f-exe">Executable Path</label>
+          <input type="text" id="f-exe" placeholder="C:\\Program Files\\...\\app.exe">
+        </div>
+        <div class="full">
+          <label for="f-args">Arguments (space-separated)</label>
+          <input type="text" id="f-args" placeholder="C:\\Projects\\main.toe">
+        </div>
+        <div>
+          <label for="f-method">Watch Method</label>
+          <select id="f-method" onchange="onMethodChange()">
+            <option value="process">Process (PID existence check)</option>
+            <option value="udp">UDP (heartbeat packet)</option>
+            <option value="file">File (timestamp update)</option>
+            <option value="http">HTTP (health check URL)</option>
+            <option value="window">Window (title existence)</option>
+          </select>
+        </div>
+        <div>
+          <label for="f-timeout">Timeout (sec)</label>
+          <input type="number" id="f-timeout" placeholder="30" value="30">
+        </div>
+
+        <!-- Watch method specific fields -->
+        <div class="full watch-fields">
+          <div class="field-row" id="wf-udp">
+            <label for="f-udp-port">UDP Port</label>
+            <input type="number" id="f-udp-port" placeholder="9001">
+            <div class="hint">Heartbeat packet to this port from the app</div>
+          </div>
+          <div class="field-row" id="wf-file">
+            <label for="f-file-path">File Path</label>
+            <input type="text" id="f-file-path" placeholder="C:\\tmp\\heartbeat.txt">
+            <div class="hint">App updates this file periodically; stale = timeout</div>
+          </div>
+          <div class="field-row" id="wf-http">
+            <label for="f-http-url">Health Check URL</label>
+            <input type="text" id="f-http-url" placeholder="http://localhost:3000/health">
+            <div style="margin-top:8px">
+              <label for="f-http-code">Expected Status Code</label>
+              <input type="number" id="f-http-code" placeholder="200" value="200">
+            </div>
+            <div class="hint">GET request; matching status code = alive</div>
+          </div>
+          <div class="field-row" id="wf-window">
+            <label for="f-window-title">Window Title (partial match)</label>
+            <input type="text" id="f-window-title" placeholder="My Application">
+            <div class="hint">Checks if a window containing this text exists</div>
+          </div>
+          <div class="field-row" id="wf-process">
+            <div class="hint">No extra settings needed. Monitors if PID is alive (cannot detect freezes).</div>
+          </div>
+        </div>
+
+        <div class="checkbox-row">
+          <input type="checkbox" id="f-autostart" checked>
+          <label for="f-autostart" style="margin:0">Auto Start (Watchdog launches the app)</label>
+        </div>
+        <div>
+          <label for="f-order">Start Order</label>
+          <input type="number" id="f-order" placeholder="0" value="0">
+          <div class="hint">Lower = earlier. Same value = parallel.</div>
+        </div>
+        <div>
+          <label for="f-delay">Start Delay (sec)</label>
+          <input type="number" id="f-delay" placeholder="0" value="0">
+          <div class="hint">Wait this long before starting this app.</div>
+        </div>
+        <div class="checkbox-row">
+          <input type="checkbox" id="f-shell">
+          <label for="f-shell" style="margin:0">Use shell open (for .toe files)</label>
+        </div>
+      </div>
+      <div class="form-actions">
+        <button class="btn btn-primary" id="btn-save" onclick="saveApp()">Add App</button>
+        <button class="btn btn-secondary" id="btn-cancel" onclick="cancelEdit()" style="display:none">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let editingId = null;
+    const $ = (sel) => document.querySelector(sel);
+    const methodMap = {udp:'UDP', process:'Process', file:'File', http:'HTTP', window:'Window'};
+    const methodColorMap = {udp:'method-udp', process:'method-process', file:'method-file', http:'method-http', window:'method-window'};
+
+    function updateClock() {
+      const now = new Date();
+      $('#clock').textContent = now.toLocaleString('ja-JP');
+    }
+    setInterval(updateClock, 1000);
+    updateClock();
+
+    function onMethodChange() {
+      const m = $('#f-method').value;
+      document.querySelectorAll('.watch-fields .field-row').forEach(el => el.classList.remove('active'));
+      const target = document.getElementById('wf-' + m);
+      if (target) target.classList.add('active');
+    }
+    onMethodChange();
+
+    async function fetchStatus() {
+      try {
+        const res = await fetch('/api/status');
+        const apps = await res.json();
+        renderTable(apps);
+      } catch (e) {
+        console.error('Status fetch error', e);
+      }
+    }
+
+    function watchDetail(a) {
+      const wc = a.WatchConfig || {};
+      switch (a.WatchMethod) {
+        case 'udp': return ':' + (wc.udp_port || '?');
+        case 'file': return wc.file_path || '-';
+        case 'http': return wc.url || '-';
+        case 'window': return '"' + (wc.window_title || '') + '"';
+        case 'process': return 'PID check';
+        default: return '-';
+      }
+    }
+
+    function renderTable(apps) {
+      const tbody = $('#status-body');
+      if (!apps || apps.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="10" class="empty-msg">No apps configured.</td></tr>';
+        return;
+      }
+      tbody.innerHTML = apps.map(a => {
+        const disabledClass = a.Enabled ? '' : ' row-disabled';
+        const toggleLabel = a.Enabled ? 'Disable' : 'Enable';
+        const toggleClass = a.Enabled ? 'btn-toggle-on' : 'btn-toggle-off';
+        const mLabel = methodMap[a.WatchMethod] || a.WatchMethod;
+        const mColor = methodColorMap[a.WatchMethod] || 'method-process';
+        const detail = watchDetail(a);
+        return `
+        <tr class="${disabledClass}">
+          <td><code>${esc(a.ID)}</code></td>
+          <td>${esc(a.Name)}</td>
+          <td>
+            <button class="actions ${toggleClass}" style="border:1px solid;padding:3px 10px;border-radius:4px;cursor:pointer;font-size:12px;"
+              onclick="toggleApp('${esc(a.ID)}')">${toggleLabel}</button>
+          </td>
+          <td>
+            <span class="method-badge ${mColor}">${mLabel}</span>
+            <span class="watch-detail">${esc(detail)}</span>
+          </td>
+          <td style="font-size:12px;">
+            ${a.AutoStart ? 'Auto' : 'Watch only'}
+            ${a.AutoStart && a.StartOrder > 0 ? '<br>#' + a.StartOrder : ''}
+            ${a.AutoStart && a.StartDelaySec > 0 ? ' +' + a.StartDelaySec + 's' : ''}
+          </td>
+          <td><span class="badge badge-${a.Status}">${a.Status}</span></td>
+          <td class="pid">${a.PID || '-'}</td>
+          <td>${a.LastHeartbeat || '-'}</td>
+          <td>${a.TimeoutSec}s</td>
+          <td class="actions">
+            <button onclick="editApp('${esc(a.ID)}')">Edit</button>
+            <button class="btn-delete" onclick="deleteApp('${esc(a.ID)}')">Delete</button>
+          </td>
+        </tr>`;
+      }).join('');
+    }
+
+    function esc(s) {
+      if (s == null) return '';
+      const d = document.createElement('div');
+      d.textContent = s;
+      return d.innerHTML;
+    }
+
+    function buildPayload() {
+      const method = $('#f-method').value;
+      const watchConfig = {};
+      switch (method) {
+        case 'udp':
+          watchConfig.udp_port = parseInt($('#f-udp-port').value) || 0;
+          break;
+        case 'file':
+          watchConfig.file_path = $('#f-file-path').value.trim();
+          break;
+        case 'http':
+          watchConfig.url = $('#f-http-url').value.trim();
+          watchConfig.expect_code = parseInt($('#f-http-code').value) || 200;
+          break;
+        case 'window':
+          watchConfig.window_title = $('#f-window-title').value.trim();
+          break;
+      }
+      return {
+        id: $('#f-id').value.trim(),
+        name: $('#f-name').value.trim(),
+        exe_path: $('#f-exe').value.trim(),
+        args: $('#f-args').value.trim() ? $('#f-args').value.trim().split(/\s+/) : [],
+        use_shell_open: $('#f-shell').checked,
+        watch_method: method,
+        watch_config: watchConfig,
+        timeout_sec: parseInt($('#f-timeout').value) || 0,
+        auto_start: $('#f-autostart').checked,
+        start_order: parseInt($('#f-order').value) || 0,
+        start_delay_sec: parseInt($('#f-delay').value) || 0,
+      };
+    }
+
+    async function saveApp() {
+      const payload = buildPayload();
+      if (!payload.id || !payload.exe_path || !payload.timeout_sec) {
+        alert('ID, Executable Path, Timeout are required.');
+        return;
+      }
+      if (payload.watch_method === 'udp' && !payload.watch_config.udp_port) {
+        alert('UDP Port is required for UDP watch method.');
+        return;
+      }
+
+      try {
+        let res;
+        if (editingId) {
+          res = await fetch('/api/app/' + encodeURIComponent(editingId), {
+            method: 'PUT',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(payload),
+          });
+        } else {
+          res = await fetch('/api/app', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(payload),
+          });
+        }
+        if (!res.ok) {
+          const msg = await res.text();
+          alert('Error: ' + msg);
+          return;
+        }
+        cancelEdit();
+        fetchStatus();
+      } catch (e) {
+        alert('Request failed: ' + e);
+      }
+    }
+
+    async function editApp(id) {
+      const res = await fetch('/api/status');
+      const apps = await res.json();
+      const app = apps.find(a => a.ID === id);
+      if (!app) return;
+
+      editingId = id;
+      $('#f-id').value = app.ID;
+      $('#f-id').disabled = true;
+      $('#f-name').value = app.Name;
+      $('#f-exe').value = app.ExePath;
+      $('#f-args').value = app.Args;
+      $('#f-shell').checked = app.UseShellOpen;
+      $('#f-method').value = app.WatchMethod || 'process';
+      $('#f-timeout').value = app.TimeoutSec;
+
+      const wc = app.WatchConfig || {};
+      $('#f-udp-port').value = wc.udp_port || '';
+      $('#f-file-path').value = wc.file_path || '';
+      $('#f-http-url').value = wc.url || '';
+      $('#f-http-code').value = wc.expect_code || 200;
+      $('#f-window-title').value = wc.window_title || '';
+      $('#f-autostart').checked = app.AutoStart;
+      $('#f-order').value = app.StartOrder || 0;
+      $('#f-delay').value = app.StartDelaySec || 0;
+
+      onMethodChange();
+      $('#form-title').textContent = 'Edit App: ' + app.ID;
+      $('#btn-save').textContent = 'Update App';
+      $('#btn-cancel').style.display = '';
+      window.scrollTo({top: document.body.scrollHeight, behavior: 'smooth'});
+    }
+
+    function cancelEdit() {
+      editingId = null;
+      $('#f-id').value = ''; $('#f-id').disabled = false;
+      $('#f-name').value = '';
+      $('#f-exe').value = '';
+      $('#f-args').value = '';
+      $('#f-shell').checked = false;
+      $('#f-method').value = 'process';
+      $('#f-timeout').value = '30';
+      $('#f-udp-port').value = '';
+      $('#f-file-path').value = '';
+      $('#f-http-url').value = '';
+      $('#f-http-code').value = '200';
+      $('#f-window-title').value = '';
+      $('#f-autostart').checked = true;
+      $('#f-order').value = '0';
+      $('#f-delay').value = '0';
+      onMethodChange();
+      $('#form-title').textContent = 'Add New App';
+      $('#btn-save').textContent = 'Add App';
+      $('#btn-cancel').style.display = 'none';
+    }
+
+    async function deleteApp(id) {
+      if (!confirm('Delete "' + id + '" and kill its process?')) return;
+      try {
+        const res = await fetch('/api/app/' + encodeURIComponent(id), {method: 'DELETE'});
+        if (!res.ok) alert('Delete failed');
+        fetchStatus();
+      } catch (e) { alert('Request failed: ' + e); }
+    }
+
+    async function toggleApp(id) {
+      try {
+        const res = await fetch('/api/app/' + encodeURIComponent(id) + '/toggle', {method: 'POST'});
+        if (!res.ok) { alert('Toggle failed'); return; }
+        fetchStatus();
+      } catch (e) { alert('Request failed: ' + e); }
+    }
+
+    async function shutdownWatchdog() {
+      if (!confirm('Shut down Watchdog? All monitored processes will be terminated.')) return;
+      try {
+        await fetch('/api/shutdown', {method: 'POST'});
+        document.body.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100vh;color:#8899aa;font-size:20px;">Watchdog has been shut down.</div>';
+      } catch (e) { alert('Shutdown request failed: ' + e); }
+    }
+
+    fetchStatus();
+    setInterval(fetchStatus, 2000);
+  </script>
+</body>
+</html>
