@@ -1,4 +1,5 @@
 {
   "web_port": 4649,
+  "show_console": false,
   "apps": []
 }

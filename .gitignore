@@ -1,6 +1,7 @@
 # Build output
 *.exe
 dist/
+*.zip
 
 # IDE / editor
 .vscode/

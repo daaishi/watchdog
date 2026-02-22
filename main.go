@@ -21,6 +21,9 @@ import (
 	"unsafe"
 )
 
+// Version is set at build time via -ldflags.
+var Version = "dev"
+
 //go:embed templates/index.html
 var embeddedTemplate string
 
@@ -29,11 +32,23 @@ var embeddedTemplate string
 // ---------------------------------------------------------------------------
 
 var (
-	user32           = syscall.NewLazyDLL("user32.dll")
-	procFindWindowW  = user32.NewProc("FindWindowW")
-	procEnumWindows  = user32.NewProc("EnumWindows")
+	kernel32            = syscall.NewLazyDLL("kernel32.dll")
+	procGetConsoleWindow = kernel32.NewProc("GetConsoleWindow")
+
+	user32             = syscall.NewLazyDLL("user32.dll")
+	procShowWindow     = user32.NewProc("ShowWindow")
+	procFindWindowW    = user32.NewProc("FindWindowW")
+	procEnumWindows    = user32.NewProc("EnumWindows")
 	procGetWindowTextW = user32.NewProc("GetWindowTextW")
 )
+
+// hideConsoleWindow hides the console window attached to this process.
+func hideConsoleWindow() {
+	hwnd, _, _ := procGetConsoleWindow.Call()
+	if hwnd != 0 {
+		procShowWindow.Call(hwnd, 0) // SW_HIDE = 0
+	}
+}
 
 func findWindowByTitle(title string) bool {
 	found := false
@@ -95,8 +110,9 @@ type AppConfig struct {
 }
 
 type Config struct {
-	WebPort int         `json:"web_port"`
-	Apps    []AppConfig `json:"apps"`
+	WebPort     int         `json:"web_port"`
+	ShowConsole bool        `json:"show_console"`
+	Apps        []AppConfig `json:"apps"`
 }
 
 // ---------------------------------------------------------------------------
@@ -182,7 +198,7 @@ func (w *Watchdog) saveConfig() error {
 // Process launch helpers
 // ---------------------------------------------------------------------------
 
-func launchApp(cfg AppConfig) (*exec.Cmd, error) {
+func launchApp(cfg AppConfig, showConsole bool) (*exec.Cmd, error) {
 	if cfg.UseShellOpen {
 		args := []string{"/C", "start", "/B", ""}
 		args = append(args, cfg.ExePath)
@@ -190,6 +206,11 @@ func launchApp(cfg AppConfig) (*exec.Cmd, error) {
 		cmd := exec.Command("cmd", args...)
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
+		if !showConsole {
+			cmd.SysProcAttr = &syscall.SysProcAttr{
+				CreationFlags: 0x08000000, // CREATE_NO_WINDOW
+			}
+		}
 		if err := cmd.Start(); err != nil {
 			return nil, err
 		}
@@ -199,6 +220,11 @@ func launchApp(cfg AppConfig) (*exec.Cmd, error) {
 	cmd := exec.Command(cfg.ExePath, cfg.Args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
+	if !showConsole {
+		cmd.SysProcAttr = &syscall.SysProcAttr{
+			CreationFlags: 0x08000000, // CREATE_NO_WINDOW
+		}
+	}
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
@@ -274,7 +300,7 @@ func (w *Watchdog) startApp(wa *WatchedApp) error {
 	wa.Status = StatusStarting
 	log.Printf("[%s] Starting %s ...", wa.Config.ID, wa.Config.Name)
 
-	cmd, err := launchApp(wa.Config)
+	cmd, err := launchApp(wa.Config, w.config.ShowConsole)
 	if err != nil {
 		wa.Status = StatusStopped
 		return fmt.Errorf("launch %s: %w", wa.Config.ID, err)
@@ -1077,11 +1103,16 @@ func main() {
 	}
 
 	configPath := filepath.Join(baseDir, "config.json")
+	log.Printf("Watchdog %s", Version)
 	log.Printf("Config: %s", configPath)
 
 	wd, err := NewWatchdog(configPath)
 	if err != nil {
 		log.Fatalf("Init error: %v", err)
+	}
+
+	if !wd.config.ShowConsole {
+		hideConsoleWindow()
 	}
 
 	wd.startAll()
