@@ -1,5 +1,6 @@
 # Build output
 *.exe
+dist/
 
 # IDE / editor
 .vscode/
