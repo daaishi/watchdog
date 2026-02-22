@@ -203,8 +203,8 @@
           <input type="text" id="f-exe" placeholder="C:\\Program Files\\...\\app.exe">
         </div>
         <div class="full">
-          <label for="f-args">Arguments (space-separated)</label>
-          <input type="text" id="f-args" placeholder="C:\\Projects\\main.toe">
+          <label for="f-args">Arguments (1 line per argument)</label>
+          <textarea id="f-args" rows="2" placeholder="C:\\Projects\\main.toe" style="width:100%;padding:8px 10px;background:#0f1923;border:1px solid #2a3e50;border-radius:4px;color:#e0e0e0;font-size:14px;font-family:inherit;outline:none;resize:vertical;"></textarea>
         </div>
         <div>
           <label for="f-method">Watch Method</label>
@@ -392,7 +392,7 @@
         id: $('#f-id').value.trim(),
         name: $('#f-name').value.trim(),
         exe_path: $('#f-exe').value.trim(),
-        args: $('#f-args').value.trim() ? $('#f-args').value.trim().split(/\s+/) : [],
+        args: $('#f-args').value.trim() ? $('#f-args').value.trim().split(/\n/).map(s => s.trim()).filter(s => s) : [],
         use_shell_open: $('#f-shell').checked,
         watch_method: method,
         watch_config: watchConfig,
@@ -452,7 +452,7 @@
       $('#f-id').disabled = true;
       $('#f-name').value = app.Name;
       $('#f-exe').value = app.ExePath;
-      $('#f-args').value = app.Args;
+      $('#f-args').value = Array.isArray(app.Args) ? app.Args.join('\n') : (app.Args || '');
       $('#f-shell').checked = app.UseShellOpen;
       $('#f-method').value = app.WatchMethod || 'process';
       $('#f-timeout').value = app.TimeoutSec;

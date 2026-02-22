@@ -766,7 +766,7 @@ type AppStatusView struct {
 	ID            string
 	Name          string
 	ExePath       string
-	Args          string
+	Args          []string
 	UseShellOpen  bool
 	WatchMethod   string
 	WatchConfig   WatchConfig
@@ -827,7 +827,7 @@ func (w *Watchdog) getStatusViews() []AppStatusView {
 			ID:            cfg.ID,
 			Name:          cfg.Name,
 			ExePath:       cfg.ExePath,
-			Args:          strings.Join(cfg.Args, " "),
+			Args:          cfg.Args,
 			UseShellOpen:  cfg.UseShellOpen,
 			WatchMethod:   cfg.WatchMethod,
 			WatchConfig:   cfg.WatchConfig,
