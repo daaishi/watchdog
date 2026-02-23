@@ -28,6 +28,74 @@ var Version = "dev"
 var embeddedTemplate string
 
 // ---------------------------------------------------------------------------
+// Date-rotating log writer
+// ---------------------------------------------------------------------------
+
+type dateRotatingWriter struct {
+	mu      sync.Mutex
+	dir     string
+	current *os.File
+	date    string
+	console bool
+}
+
+func newDateRotatingWriter(dir string, console bool) (*dateRotatingWriter, error) {
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return nil, fmt.Errorf("create log dir %q: %w", dir, err)
+	}
+	w := &dateRotatingWriter{dir: dir, console: console}
+	if err := w.rotate(); err != nil {
+		return nil, err
+	}
+	return w, nil
+}
+
+func (w *dateRotatingWriter) rotate() error {
+	today := time.Now().Format("2006-01-02")
+	if w.date == today && w.current != nil {
+		return nil
+	}
+	if w.current != nil {
+		w.current.Close()
+	}
+	filename := filepath.Join(w.dir, fmt.Sprintf("watchdog-%s.log", today))
+	f, err := os.OpenFile(filename, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		return err
+	}
+	w.current = f
+	w.date = today
+	return nil
+}
+
+func (w *dateRotatingWriter) Write(p []byte) (n int, err error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if rotErr := w.rotate(); rotErr != nil {
+		if w.current == nil {
+			if w.console {
+				return os.Stdout.Write(p)
+			}
+			return 0, rotErr
+		}
+	}
+	n, err = w.current.Write(p)
+	if w.console {
+		os.Stdout.Write(p)
+	}
+	return n, err
+}
+
+func (w *dateRotatingWriter) Close() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.current != nil {
+		return w.current.Close()
+	}
+	return nil
+}
+
+// ---------------------------------------------------------------------------
 // Windows API for window-title monitoring
 // ---------------------------------------------------------------------------
 
@@ -94,24 +162,34 @@ type WatchConfig struct {
 	WindowTitle string `json:"window_title,omitempty"`
 }
 
+type ScheduleConfig struct {
+	StartTime string   `json:"start_time"` // "HH:MM"
+	StopTime  string   `json:"stop_time"`  // "HH:MM"
+	Days      []string `json:"days"`       // e.g. ["Monday","Friday"], empty = every day
+}
+
 type AppConfig struct {
-	ID            string      `json:"id"`
-	Name          string      `json:"name"`
-	ExePath       string      `json:"exe_path"`
-	Args          []string    `json:"args"`
-	UseShellOpen  bool        `json:"use_shell_open"`
-	WatchMethod   string      `json:"watch_method"`
-	WatchConfig   WatchConfig `json:"watch_config"`
-	TimeoutSec    int         `json:"timeout_sec"`
-	Enabled       bool        `json:"enabled"`
-	AutoStart     bool        `json:"auto_start"`
-	StartOrder    int         `json:"start_order"`
-	StartDelaySec int         `json:"start_delay_sec"`
+	ID            string          `json:"id"`
+	Name          string          `json:"name"`
+	ExePath       string          `json:"exe_path"`
+	Args          []string        `json:"args"`
+	UseShellOpen  bool            `json:"use_shell_open"`
+	WatchMethod   string          `json:"watch_method"`
+	WatchConfig   WatchConfig     `json:"watch_config"`
+	TimeoutSec    int             `json:"timeout_sec"`
+	Enabled       bool            `json:"enabled"`
+	AutoStart     bool            `json:"auto_start"`
+	StartOrder    int             `json:"start_order"`
+	StartDelaySec int             `json:"start_delay_sec"`
+	Schedule      *ScheduleConfig `json:"schedule,omitempty"`
 }
 
 type Config struct {
 	WebPort     int         `json:"web_port"`
 	ShowConsole bool        `json:"show_console"`
+	LogDir      string      `json:"log_dir"`
+	RebootTime  string      `json:"reboot_time,omitempty"`
+	RebootDays  []string    `json:"reboot_days,omitempty"`
 	Apps        []AppConfig `json:"apps"`
 }
 
@@ -152,6 +230,7 @@ type Watchdog struct {
 	mu         sync.RWMutex
 	templates  *template.Template
 	httpServer *http.Server
+	logWriter  *dateRotatingWriter
 	shutdownCh chan struct{}
 }
 
@@ -605,6 +684,65 @@ func (w *Watchdog) watchWindow(wa *WatchedApp) {
 }
 
 // ---------------------------------------------------------------------------
+// Schedule helpers
+// ---------------------------------------------------------------------------
+
+func parseHHMM(s string) (int, int, error) {
+	parts := strings.SplitN(s, ":", 2)
+	if len(parts) != 2 {
+		return 0, 0, fmt.Errorf("invalid time format %q", s)
+	}
+	h, err := strconv.Atoi(parts[0])
+	if err != nil || h < 0 || h > 23 {
+		return 0, 0, fmt.Errorf("invalid hour in %q", s)
+	}
+	m, err := strconv.Atoi(parts[1])
+	if err != nil || m < 0 || m > 59 {
+		return 0, 0, fmt.Errorf("invalid minute in %q", s)
+	}
+	return h, m, nil
+}
+
+func isDayMatch(days []string, now time.Time) bool {
+	if len(days) == 0 {
+		return true
+	}
+	today := now.Weekday().String()
+	for _, d := range days {
+		if strings.EqualFold(d, today) {
+			return true
+		}
+	}
+	return false
+}
+
+func isInSchedule(sched *ScheduleConfig, now time.Time) bool {
+	if sched == nil || sched.StartTime == "" || sched.StopTime == "" {
+		return true // no schedule = always on
+	}
+	if !isDayMatch(sched.Days, now) {
+		return false
+	}
+	startH, startM, err := parseHHMM(sched.StartTime)
+	if err != nil {
+		return true
+	}
+	stopH, stopM, err := parseHHMM(sched.StopTime)
+	if err != nil {
+		return true
+	}
+	startMin := startH*60 + startM
+	stopMin := stopH*60 + stopM
+	nowMin := now.Hour()*60 + now.Minute()
+
+	if startMin <= stopMin {
+		return nowMin >= startMin && nowMin < stopMin
+	}
+	// Overnight: e.g. 22:00 - 06:00
+	return nowMin >= startMin || nowMin < stopMin
+}
+
+// ---------------------------------------------------------------------------
 // Timeout checker (shared for all watch methods)
 // ---------------------------------------------------------------------------
 
@@ -631,6 +769,60 @@ func (w *Watchdog) watchTimeout(wa *WatchedApp) {
 				log.Printf("[%s] Heartbeat timeout (%ds). Restarting ...",
 					wa.Config.ID, timeout)
 				w.killAndRestart(wa)
+			}
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Schedule-based app start/stop
+// ---------------------------------------------------------------------------
+
+func (w *Watchdog) watchSchedule(wa *WatchedApp) {
+	sched := wa.Config.Schedule
+	if sched == nil || sched.StartTime == "" || sched.StopTime == "" {
+		return
+	}
+
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	log.Printf("[%s] Schedule active: %s-%s days=%v",
+		wa.Config.ID, sched.StartTime, sched.StopTime, sched.Days)
+
+	scheduledStop := false
+
+	for {
+		select {
+		case <-wa.stopCh:
+			return
+		case <-ticker.C:
+			now := time.Now()
+			inSched := isInSchedule(sched, now)
+
+			wa.mu.Lock()
+			status := wa.Status
+			wa.mu.Unlock()
+
+			if !inSched && status == StatusRunning && !scheduledStop {
+				log.Printf("[%s] Outside schedule (%s-%s), stopping",
+					wa.Config.ID, sched.StartTime, sched.StopTime)
+				wa.mu.Lock()
+				pid := wa.PID
+				wa.Status = StatusStopped
+				wa.PID = 0
+				wa.mu.Unlock()
+				if pid > 0 {
+					killPID(pid)
+				}
+				scheduledStop = true
+			} else if inSched && scheduledStop {
+				log.Printf("[%s] Inside schedule (%s-%s), starting",
+					wa.Config.ID, sched.StartTime, sched.StopTime)
+				if err := w.startApp(wa); err != nil {
+					log.Printf("[%s] Schedule restart failed: %v", wa.Config.ID, err)
+				}
+				scheduledStop = false
 			}
 		}
 	}
@@ -670,6 +862,16 @@ func (w *Watchdog) addAndStart(cfg AppConfig) error {
 		Config: cfg,
 		Status: StatusStopped,
 		stopCh: make(chan struct{}),
+	}
+
+	hasSchedule := cfg.Schedule != nil && cfg.Schedule.StartTime != "" && cfg.Schedule.StopTime != ""
+
+	// If outside schedule, don't start the app — just register and wait.
+	if hasSchedule && !isInSchedule(cfg.Schedule, time.Now()) {
+		log.Printf("[%s] Outside schedule, not starting", cfg.ID)
+		w.apps[cfg.ID] = wa
+		go w.watchSchedule(wa)
+		return nil
 	}
 
 	if cfg.AutoStart {
@@ -716,6 +918,9 @@ func (w *Watchdog) addAndStart(cfg AppConfig) error {
 	}
 
 	go w.watchTimeout(wa)
+	if hasSchedule {
+		go w.watchSchedule(wa)
+	}
 	return nil
 }
 
@@ -801,6 +1006,7 @@ type AppStatusView struct {
 	AutoStart     bool
 	StartOrder    int
 	StartDelaySec int
+	Schedule      *ScheduleConfig
 	PID           int
 	Status        string
 	LastHeartbeat string
@@ -862,6 +1068,7 @@ func (w *Watchdog) getStatusViews() []AppStatusView {
 			AutoStart:     cfg.AutoStart,
 			StartOrder:    cfg.StartOrder,
 			StartDelaySec: cfg.StartDelaySec,
+			Schedule:      cfg.Schedule,
 			Status:        "disabled",
 		}
 		if !cfg.Enabled {
@@ -896,8 +1103,19 @@ func (w *Watchdog) handleIndex(rw http.ResponseWriter, r *http.Request) {
 }
 
 func (w *Watchdog) handleAPIStatus(rw http.ResponseWriter, r *http.Request) {
+	w.mu.RLock()
+	settings := map[string]interface{}{
+		"log_dir":     w.config.LogDir,
+		"reboot_time": w.config.RebootTime,
+		"reboot_days": w.config.RebootDays,
+	}
+	w.mu.RUnlock()
+
 	rw.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(rw).Encode(w.getStatusViews())
+	json.NewEncoder(rw).Encode(map[string]interface{}{
+		"apps":     w.getStatusViews(),
+		"settings": settings,
+	})
 }
 
 func (w *Watchdog) handleAddApp(rw http.ResponseWriter, r *http.Request) {
@@ -1065,6 +1283,101 @@ func (w *Watchdog) handleShutdown(rw http.ResponseWriter, r *http.Request) {
 	}()
 }
 
+func (w *Watchdog) handleSettings(rw http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		w.mu.RLock()
+		defer w.mu.RUnlock()
+		rw.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(rw).Encode(map[string]interface{}{
+			"log_dir":     w.config.LogDir,
+			"reboot_time": w.config.RebootTime,
+			"reboot_days": w.config.RebootDays,
+		})
+	case http.MethodPut:
+		var payload struct {
+			LogDir     string   `json:"log_dir"`
+			RebootTime string   `json:"reboot_time"`
+			RebootDays []string `json:"reboot_days"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			http.Error(rw, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if payload.RebootTime != "" {
+			if _, _, err := parseHHMM(payload.RebootTime); err != nil {
+				http.Error(rw, "invalid reboot_time: "+err.Error(), http.StatusBadRequest)
+				return
+			}
+		}
+		w.mu.Lock()
+		w.config.LogDir = payload.LogDir
+		w.config.RebootTime = payload.RebootTime
+		w.config.RebootDays = payload.RebootDays
+		w.saveConfig()
+		w.mu.Unlock()
+
+		rw.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(rw).Encode(map[string]string{"status": "ok"})
+	default:
+		http.Error(rw, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Scheduled PC reboot
+// ---------------------------------------------------------------------------
+
+func (w *Watchdog) watchReboot() {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	triggered := false
+
+	for {
+		select {
+		case <-w.shutdownCh:
+			return
+		case <-ticker.C:
+			w.mu.RLock()
+			rebootTime := w.config.RebootTime
+			rebootDays := w.config.RebootDays
+			w.mu.RUnlock()
+
+			if rebootTime == "" {
+				triggered = false
+				continue
+			}
+			rebootH, rebootM, err := parseHHMM(rebootTime)
+			if err != nil {
+				continue
+			}
+
+			now := time.Now()
+			if now.Hour() == rebootH && now.Minute() == rebootM {
+				if triggered {
+					continue
+				}
+				if !isDayMatch(rebootDays, now) {
+					continue
+				}
+				triggered = true
+				log.Printf("[reboot] Reboot time reached. Stopping all apps ...")
+				w.stopAll()
+				log.Printf("[reboot] All apps stopped. Rebooting PC ...")
+				time.Sleep(2 * time.Second)
+				cmd := exec.Command("shutdown", "/r", "/t", "0")
+				if err := cmd.Run(); err != nil {
+					log.Printf("[reboot] shutdown command failed: %v", err)
+				}
+				return
+			} else {
+				triggered = false
+			}
+		}
+	}
+}
+
 func (w *Watchdog) apiAppRouter(rw http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodPost:
@@ -1111,15 +1424,33 @@ func main() {
 		log.Fatalf("Init error: %v", err)
 	}
 
+	// Setup file logging.
+	logDir := wd.config.LogDir
+	if logDir == "" {
+		logDir = "logs"
+	}
+	if !filepath.IsAbs(logDir) {
+		logDir = filepath.Join(baseDir, logDir)
+	}
+	logWriter, err := newDateRotatingWriter(logDir, wd.config.ShowConsole)
+	if err != nil {
+		log.Fatalf("Log init error: %v", err)
+	}
+	defer logWriter.Close()
+	wd.logWriter = logWriter
+	log.SetOutput(logWriter)
+
 	if !wd.config.ShowConsole {
 		hideConsoleWindow()
 	}
 
 	wd.startAll()
+	go wd.watchReboot()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", wd.handleIndex)
 	mux.HandleFunc("/api/status", wd.handleAPIStatus)
+	mux.HandleFunc("/api/settings", wd.handleSettings)
 	mux.HandleFunc("/api/app", wd.apiAppRouter)
 	mux.HandleFunc("/api/app/", wd.apiAppRouter)
 	mux.HandleFunc("/api/shutdown", wd.handleShutdown)

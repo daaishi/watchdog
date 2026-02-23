@@ -155,18 +155,56 @@
     .watch-fields .field-row { display: none; }
     .watch-fields .field-row.active { display: block; }
     .hint { font-size: 11px; color: #4a6a7a; margin-top: 2px; }
+    .day-checks { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 4px; }
+    .day-checks label { display: flex; align-items: center; gap: 4px; cursor: pointer; font-size: 13px; color: #8899aa; }
+    .day-checks input[type="checkbox"] { accent-color: #2d9cdb; width: 14px; height: 14px; }
   </style>
 </head>
 <body>
   <header>
     <h1>Watchdog Monitor</h1>
     <div style="display:flex;align-items:center;gap:16px;">
+      <span id="header-reboot" style="color:#fbbf24;font-size:13px;display:none;"></span>
       <div class="clock" id="clock"></div>
       <button class="btn btn-danger" onclick="shutdownWatchdog()">Shutdown</button>
     </div>
   </header>
 
   <div class="container">
+    <!-- Global Settings -->
+    <div class="form-section">
+      <h2>Global Settings</h2>
+      <div class="form-grid">
+        <div>
+          <label for="f-reboot-time">Reboot Time (HH:MM)</label>
+          <input type="text" id="f-reboot-time" placeholder="04:00">
+          <div class="hint">Leave empty to disable scheduled reboot.</div>
+        </div>
+        <div>
+          <label>Reboot Days</label>
+          <div class="day-checks" id="reboot-days">
+            <label><input type="checkbox" value="Monday" class="reboot-day"> Mon</label>
+            <label><input type="checkbox" value="Tuesday" class="reboot-day"> Tue</label>
+            <label><input type="checkbox" value="Wednesday" class="reboot-day"> Wed</label>
+            <label><input type="checkbox" value="Thursday" class="reboot-day"> Thu</label>
+            <label><input type="checkbox" value="Friday" class="reboot-day"> Fri</label>
+            <label><input type="checkbox" value="Saturday" class="reboot-day"> Sat</label>
+            <label><input type="checkbox" value="Sunday" class="reboot-day"> Sun</label>
+          </div>
+          <div class="hint">Empty = every day.</div>
+        </div>
+        <div>
+          <label for="f-log-dir">Log Directory</label>
+          <input type="text" id="f-log-dir" placeholder="logs" value="logs">
+          <div class="hint">Relative to exe or absolute path.</div>
+        </div>
+      </div>
+      <div class="form-actions">
+        <button class="btn btn-primary" onclick="saveSettings()">Save Settings</button>
+      </div>
+    </div>
+
+    <!-- App Status Table -->
     <table>
       <thead>
         <tr>
@@ -175,6 +213,7 @@
           <th>Monitor</th>
           <th>Watch Method</th>
           <th>Start</th>
+          <th>Schedule</th>
           <th>Status</th>
           <th>PID</th>
           <th>Last Heartbeat</th>
@@ -183,10 +222,11 @@
         </tr>
       </thead>
       <tbody id="status-body">
-        <tr><td colspan="10" class="empty-msg">Loading...</td></tr>
+        <tr><td colspan="11" class="empty-msg">Loading...</td></tr>
       </tbody>
     </table>
 
+    <!-- Add / Edit App Form -->
     <div class="form-section">
       <h2 id="form-title">Add New App</h2>
       <div class="form-grid">
@@ -271,6 +311,32 @@
           <input type="checkbox" id="f-shell">
           <label for="f-shell" style="margin:0">Use shell open (for .toe files)</label>
         </div>
+
+        <!-- Schedule -->
+        <div class="full" style="margin-top:8px;border-top:1px solid #253545;padding-top:12px;">
+          <label style="font-size:14px;color:#2d9cdb;margin-bottom:8px;display:block;">Schedule (optional)</label>
+          <div class="hint" style="margin-bottom:8px;">Leave start/stop time empty for always-on behavior.</div>
+        </div>
+        <div>
+          <label for="f-sched-start">Start Time (HH:MM)</label>
+          <input type="text" id="f-sched-start" placeholder="09:00">
+        </div>
+        <div>
+          <label for="f-sched-stop">Stop Time (HH:MM)</label>
+          <input type="text" id="f-sched-stop" placeholder="18:00">
+        </div>
+        <div class="full">
+          <label>Active Days (empty = every day)</label>
+          <div class="day-checks" id="sched-days">
+            <label><input type="checkbox" value="Monday" class="sched-day"> Mon</label>
+            <label><input type="checkbox" value="Tuesday" class="sched-day"> Tue</label>
+            <label><input type="checkbox" value="Wednesday" class="sched-day"> Wed</label>
+            <label><input type="checkbox" value="Thursday" class="sched-day"> Thu</label>
+            <label><input type="checkbox" value="Friday" class="sched-day"> Fri</label>
+            <label><input type="checkbox" value="Saturday" class="sched-day"> Sat</label>
+            <label><input type="checkbox" value="Sunday" class="sched-day"> Sun</label>
+          </div>
+        </div>
       </div>
       <div class="form-actions">
         <button class="btn btn-primary" id="btn-save" onclick="saveApp()">Add App</button>
@@ -281,11 +347,11 @@
 
   <script>
     let editingId = null;
+    let settingsLoaded = false;
     const $ = (sel) => document.querySelector(sel);
     const methodMap = {udp:'UDP', process:'Process', file:'File', http:'HTTP', window:'Window'};
     const methodColorMap = {udp:'method-udp', process:'method-process', file:'method-file', http:'method-http', window:'method-window'};
 
-    // Parse a command-line style string: "path with spaces" arg2 arg3
     function parseArgs(str) {
       const s = (str || '').trim();
       if (!s) return [];
@@ -306,7 +372,6 @@
       return args;
     }
 
-    // Format args array back to command-line style string
     function formatArgs(args) {
       if (!Array.isArray(args) || args.length === 0) return '';
       return args.map(a => a.includes(' ') ? '"' + a + '"' : a).join(' ');
@@ -330,11 +395,22 @@
     async function fetchStatus() {
       try {
         const res = await fetch('/api/status');
-        const apps = await res.json();
-        renderTable(apps);
+        const data = await res.json();
+        renderTable(data.apps);
+        renderSettings(data.settings);
       } catch (e) {
         console.error('Status fetch error', e);
       }
+    }
+
+    function formatSchedule(sched) {
+      if (!sched || !sched.start_time || !sched.stop_time) return '<span style="color:#5a7080">Always</span>';
+      let s = sched.start_time + ' - ' + sched.stop_time;
+      if (sched.days && sched.days.length > 0) {
+        const short = sched.days.map(d => d.substring(0,3));
+        s += '<br><span style="font-size:11px;color:#6b8da6">' + short.join(', ') + '</span>';
+      }
+      return s;
     }
 
     function watchDetail(a) {
@@ -352,7 +428,7 @@
     function renderTable(apps) {
       const tbody = $('#status-body');
       if (!apps || apps.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="10" class="empty-msg">No apps configured.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="11" class="empty-msg">No apps configured.</td></tr>';
         return;
       }
       tbody.innerHTML = apps.map(a => {
@@ -379,6 +455,7 @@
             ${a.AutoStart && a.StartOrder > 0 ? '<br>#' + a.StartOrder : ''}
             ${a.AutoStart && a.StartDelaySec > 0 ? ' +' + a.StartDelaySec + 's' : ''}
           </td>
+          <td style="font-size:12px;">${formatSchedule(a.Schedule)}</td>
           <td><span class="badge badge-${a.Status}">${a.Status}</span></td>
           <td class="pid">${a.PID || '-'}</td>
           <td>${a.LastHeartbeat || '-'}</td>
@@ -389,6 +466,36 @@
           </td>
         </tr>`;
       }).join('');
+    }
+
+    function renderSettings(settings) {
+      if (!settings) return;
+      // Don't overwrite while user is editing
+      const active = document.activeElement;
+      if (active && active.id && (active.id.startsWith('f-reboot') || active.id === 'f-log-dir')) return;
+
+      if (!settingsLoaded) {
+        $('#f-reboot-time').value = settings.reboot_time || '';
+        $('#f-log-dir').value = settings.log_dir || 'logs';
+        document.querySelectorAll('.reboot-day').forEach(cb => {
+          cb.checked = settings.reboot_days ? settings.reboot_days.includes(cb.value) : false;
+        });
+        settingsLoaded = true;
+      }
+
+      const hdr = $('#header-reboot');
+      if (settings.reboot_time) {
+        let info = 'Reboot: ' + settings.reboot_time;
+        if (settings.reboot_days && settings.reboot_days.length > 0) {
+          info += ' (' + settings.reboot_days.map(d => d.substring(0,3)).join(', ') + ')';
+        } else {
+          info += ' (every day)';
+        }
+        hdr.textContent = info;
+        hdr.style.display = '';
+      } else {
+        hdr.style.display = 'none';
+      }
     }
 
     function esc(s) {
@@ -416,7 +523,12 @@
           watchConfig.window_title = $('#f-window-title').value.trim();
           break;
       }
-      return {
+
+      const schedStart = $('#f-sched-start').value.trim();
+      const schedStop = $('#f-sched-stop').value.trim();
+      const schedDays = Array.from(document.querySelectorAll('.sched-day:checked')).map(cb => cb.value);
+
+      const payload = {
         id: $('#f-id').value.trim(),
         name: $('#f-name').value.trim(),
         exe_path: $('#f-exe').value.trim(),
@@ -429,6 +541,18 @@
         start_order: parseInt($('#f-order').value) || 0,
         start_delay_sec: parseInt($('#f-delay').value) || 0,
       };
+
+      if (schedStart && schedStop) {
+        payload.schedule = {
+          start_time: schedStart,
+          stop_time: schedStop,
+          days: schedDays,
+        };
+      } else {
+        payload.schedule = null;
+      }
+
+      return payload;
     }
 
     async function saveApp() {
@@ -471,8 +595,8 @@
 
     async function editApp(id) {
       const res = await fetch('/api/status');
-      const apps = await res.json();
-      const app = apps.find(a => a.ID === id);
+      const data = await res.json();
+      const app = (data.apps || []).find(a => a.ID === id);
       if (!app) return;
 
       editingId = id;
@@ -494,6 +618,13 @@
       $('#f-autostart').checked = app.AutoStart;
       $('#f-order').value = app.StartOrder || 0;
       $('#f-delay').value = app.StartDelaySec || 0;
+
+      const sched = app.Schedule;
+      $('#f-sched-start').value = sched ? sched.start_time || '' : '';
+      $('#f-sched-stop').value = sched ? sched.stop_time || '' : '';
+      document.querySelectorAll('.sched-day').forEach(cb => {
+        cb.checked = sched && sched.days ? sched.days.includes(cb.value) : false;
+      });
 
       onMethodChange();
       $('#form-title').textContent = 'Edit App: ' + app.ID;
@@ -519,10 +650,39 @@
       $('#f-autostart').checked = true;
       $('#f-order').value = '0';
       $('#f-delay').value = '0';
+      $('#f-sched-start').value = '';
+      $('#f-sched-stop').value = '';
+      document.querySelectorAll('.sched-day').forEach(cb => cb.checked = false);
       onMethodChange();
       $('#form-title').textContent = 'Add New App';
       $('#btn-save').textContent = 'Add App';
       $('#btn-cancel').style.display = 'none';
+    }
+
+    async function saveSettings() {
+      const rebootTime = $('#f-reboot-time').value.trim();
+      const rebootDays = Array.from(document.querySelectorAll('.reboot-day:checked')).map(cb => cb.value);
+      const logDir = $('#f-log-dir').value.trim();
+      try {
+        const res = await fetch('/api/settings', {
+          method: 'PUT',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({
+            log_dir: logDir,
+            reboot_time: rebootTime,
+            reboot_days: rebootDays,
+          }),
+        });
+        if (!res.ok) {
+          const msg = await res.text();
+          alert('Error: ' + msg);
+          return;
+        }
+        settingsLoaded = false;
+        fetchStatus();
+      } catch (e) {
+        alert('Request failed: ' + e);
+      }
     }
 
     async function deleteApp(id) {
