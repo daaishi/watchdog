@@ -158,6 +158,45 @@
     .day-checks { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 4px; }
     .day-checks label { display: flex; align-items: center; gap: 4px; cursor: pointer; font-size: 13px; color: #8899aa; }
     .day-checks input[type="checkbox"] { accent-color: #2d9cdb; width: 14px; height: 14px; }
+
+    /* Collapsible section (whole block, e.g. Global Settings) */
+    details.collapse { background: #162029; border-radius: 8px; margin-bottom: 24px; }
+    details.collapse > summary {
+      cursor: pointer; list-style: none; padding: 16px 24px;
+      font-size: 16px; color: #2d9cdb; font-weight: 600;
+      display: flex; align-items: center; gap: 8px;
+    }
+    details.collapse > summary::-webkit-details-marker { display: none; }
+    details.collapse > summary::before {
+      content: '\25B8'; font-size: 12px; color: #6b8da6; transition: transform 0.15s;
+    }
+    details.collapse[open] > summary::before { transform: rotate(90deg); }
+    details.collapse .collapse-body { padding: 0 24px 20px; }
+
+    /* Advanced (詳細設定) fold inside a form */
+    details.advanced { margin-top: 8px; border-top: 1px solid #253545; }
+    details.advanced > summary {
+      cursor: pointer; list-style: none; padding: 12px 0 4px;
+      color: #2d9cdb; font-size: 14px; font-weight: 600;
+      display: flex; align-items: center; gap: 8px;
+    }
+    details.advanced > summary::-webkit-details-marker { display: none; }
+    details.advanced > summary::before {
+      content: '\25B8'; font-size: 11px; color: #6b8da6; transition: transform 0.15s;
+    }
+    details.advanced[open] > summary::before { transform: rotate(90deg); }
+    details.advanced .form-grid { margin-top: 12px; }
+    .cell-sub { font-size: 11px; color: #6b8da6; display: block; margin-top: 2px; }
+
+    /* Input + native Browse button */
+    .input-with-btn { display: flex; gap: 8px; }
+    .input-with-btn input { flex: 1; }
+    .btn-browse {
+      white-space: nowrap; padding: 8px 14px;
+      background: #2a3e50; color: #e0e0e0;
+      border: none; border-radius: 4px; cursor: pointer; font-size: 13px;
+    }
+    .btn-browse:hover { opacity: 0.85; }
   </style>
 </head>
 <body>
@@ -171,58 +210,59 @@
   </header>
 
   <div class="container">
-    <!-- Global Settings -->
-    <div class="form-section">
-      <h2>Global Settings</h2>
-      <div class="form-grid">
-        <div>
-          <label for="f-reboot-time">Reboot Time (HH:MM)</label>
-          <input type="text" id="f-reboot-time" placeholder="04:00">
-          <div class="hint">Leave empty to disable scheduled reboot.</div>
-        </div>
-        <div>
-          <label>Reboot Days</label>
-          <div class="day-checks" id="reboot-days">
-            <label><input type="checkbox" value="Monday" class="reboot-day"> Mon</label>
-            <label><input type="checkbox" value="Tuesday" class="reboot-day"> Tue</label>
-            <label><input type="checkbox" value="Wednesday" class="reboot-day"> Wed</label>
-            <label><input type="checkbox" value="Thursday" class="reboot-day"> Thu</label>
-            <label><input type="checkbox" value="Friday" class="reboot-day"> Fri</label>
-            <label><input type="checkbox" value="Saturday" class="reboot-day"> Sat</label>
-            <label><input type="checkbox" value="Sunday" class="reboot-day"> Sun</label>
+    <!-- Global Settings (collapsed by default — rarely changed) -->
+    <details class="collapse">
+      <summary>Global Settings</summary>
+      <div class="collapse-body">
+        <div class="form-grid">
+          <div>
+            <label for="f-reboot-time">Reboot Time (HH:MM)</label>
+            <input type="text" id="f-reboot-time" placeholder="04:00">
+            <div class="hint">Leave empty to disable scheduled reboot.</div>
           </div>
-          <div class="hint">Empty = every day.</div>
+          <div>
+            <label>Reboot Days</label>
+            <div class="day-checks" id="reboot-days">
+              <label><input type="checkbox" value="Monday" class="reboot-day"> Mon</label>
+              <label><input type="checkbox" value="Tuesday" class="reboot-day"> Tue</label>
+              <label><input type="checkbox" value="Wednesday" class="reboot-day"> Wed</label>
+              <label><input type="checkbox" value="Thursday" class="reboot-day"> Thu</label>
+              <label><input type="checkbox" value="Friday" class="reboot-day"> Fri</label>
+              <label><input type="checkbox" value="Saturday" class="reboot-day"> Sat</label>
+              <label><input type="checkbox" value="Sunday" class="reboot-day"> Sun</label>
+            </div>
+            <div class="hint">Empty = every day.</div>
+          </div>
+          <div>
+            <label for="f-log-dir">Log Directory</label>
+            <div class="input-with-btn">
+              <input type="text" id="f-log-dir" placeholder="logs" value="logs">
+              <button type="button" class="btn-browse" onclick="pickPath('folder', '#f-log-dir')">参照...</button>
+            </div>
+            <div class="hint">Relative to exe or absolute path.</div>
+          </div>
         </div>
-        <div>
-          <label for="f-log-dir">Log Directory</label>
-          <input type="text" id="f-log-dir" placeholder="logs" value="logs">
-          <div class="hint">Relative to exe or absolute path.</div>
+        <div class="form-actions">
+          <button class="btn btn-primary" onclick="saveSettings()">Save Settings</button>
         </div>
       </div>
-      <div class="form-actions">
-        <button class="btn btn-primary" onclick="saveSettings()">Save Settings</button>
-      </div>
-    </div>
+    </details>
 
     <!-- App Status Table -->
     <table>
       <thead>
         <tr>
-          <th>ID</th>
-          <th>Name</th>
-          <th>Monitor</th>
+          <th>App</th>
           <th>Watch Method</th>
-          <th>Start</th>
-          <th>Schedule</th>
+          <th>Start / Schedule</th>
           <th>Status</th>
           <th>PID</th>
           <th>Last Heartbeat</th>
-          <th>Timeout</th>
           <th>Actions</th>
         </tr>
       </thead>
       <tbody id="status-body">
-        <tr><td colspan="11" class="empty-msg">Loading...</td></tr>
+        <tr><td colspan="7" class="empty-msg">Loading...</td></tr>
       </tbody>
     </table>
 
@@ -231,21 +271,8 @@
       <h2 id="form-title">Add New App</h2>
       <div class="form-grid">
         <div>
-          <label for="f-id">ID</label>
-          <input type="text" id="f-id" placeholder="e.g. td-main">
-        </div>
-        <div>
           <label for="f-name">Name</label>
           <input type="text" id="f-name" placeholder="e.g. TouchDesigner Main">
-        </div>
-        <div class="full">
-          <label for="f-exe">Executable Path</label>
-          <input type="text" id="f-exe" placeholder="C:\\Program Files\\...\\app.exe">
-        </div>
-        <div class="full">
-          <label for="f-args">Arguments (use "quotes" for paths with spaces)</label>
-          <input type="text" id="f-args" placeholder='e.g. "C:\\My Projects\\main.toe" --verbose'>
-          <div class="hint">Example: "C:\path with spaces\file.toe" --flag value</div>
         </div>
         <div>
           <label for="f-method">Watch Method</label>
@@ -256,6 +283,13 @@
             <option value="http">HTTP (health check URL)</option>
             <option value="window">Window (title existence)</option>
           </select>
+        </div>
+        <div class="full">
+          <label for="f-exe">Executable Path</label>
+          <div class="input-with-btn">
+            <input type="text" id="f-exe" placeholder="C:\\Program Files\\...\\app.exe">
+            <button type="button" class="btn-browse" onclick="pickPath('exe', '#f-exe', onExePicked)">参照...</button>
+          </div>
         </div>
         <div>
           <label for="f-timeout">Timeout (sec)</label>
@@ -271,7 +305,10 @@
           </div>
           <div class="field-row" id="wf-file">
             <label for="f-file-path">File Path</label>
-            <input type="text" id="f-file-path" placeholder="C:\\tmp\\heartbeat.txt">
+            <div class="input-with-btn">
+              <input type="text" id="f-file-path" placeholder="C:\\tmp\\heartbeat.txt">
+              <button type="button" class="btn-browse" onclick="pickPath('file', '#f-file-path')">参照...</button>
+            </div>
             <div class="hint">App updates this file periodically; stale = timeout</div>
           </div>
           <div class="field-row" id="wf-http">
@@ -292,7 +329,21 @@
             <div class="hint">No extra settings needed. Monitors if PID is alive (cannot detect freezes).</div>
           </div>
         </div>
+      </div>
 
+      <details class="advanced">
+        <summary>詳細設定 (ID / Arguments / 起動設定 / Schedule)</summary>
+        <div class="form-grid">
+        <div>
+          <label for="f-id">ID</label>
+          <input type="text" id="f-id" placeholder="auto-generated from name">
+          <div class="hint">Leave empty to auto-generate from the name.</div>
+        </div>
+        <div class="full">
+          <label for="f-args">Arguments (use "quotes" for paths with spaces)</label>
+          <input type="text" id="f-args" placeholder='e.g. "C:\\My Projects\\main.toe" --verbose'>
+          <div class="hint">Example: "C:\path with spaces\file.toe" --flag value</div>
+        </div>
         <div class="checkbox-row">
           <input type="checkbox" id="f-autostart" checked>
           <label for="f-autostart" style="margin:0">Auto Start (Watchdog launches the app)</label>
@@ -337,7 +388,8 @@
             <label><input type="checkbox" value="Sunday" class="sched-day"> Sun</label>
           </div>
         </div>
-      </div>
+        </div>
+      </details>
       <div class="form-actions">
         <button class="btn btn-primary" id="btn-save" onclick="saveApp()">Add App</button>
         <button class="btn btn-secondary" id="btn-cancel" onclick="cancelEdit()" style="display:none">Cancel</button>
@@ -375,6 +427,40 @@
     function formatArgs(args) {
       if (!Array.isArray(args) || args.length === 0) return '';
       return args.map(a => a.includes(' ') ? '"' + a + '"' : a).join(' ');
+    }
+
+    // Ask the server to open a native file/folder dialog and fill the target input.
+    async function pickPath(type, targetSel, onPicked) {
+      try {
+        const res = await fetch('/api/pick?type=' + encodeURIComponent(type));
+        if (!res.ok) { alert('ダイアログを開けませんでした'); return; }
+        const data = await res.json();
+        if (!data.path) return; // cancelled
+        $(targetSel).value = data.path;
+        if (typeof onPicked === 'function') onPicked(data.path);
+      } catch (e) {
+        alert('Request failed: ' + e);
+      }
+    }
+
+    // After picking an executable: auto-fill the name and detect non-exe targets.
+    function onExePicked(path) {
+      const nameEl = $('#f-name');
+      if (!nameEl.value.trim()) {
+        const base = path.replace(/\\/g, '/').split('/').pop() || '';
+        nameEl.value = base.replace(/\.[^.]+$/, '');
+      }
+      // A non-.exe target (e.g. a .toe document) is launched via shell open.
+      if (!/\.exe$/i.test(path)) {
+        $('#f-shell').checked = true;
+      }
+    }
+
+    // Derive an id from a display name: lowercase, non-alphanumerics -> '-'.
+    function slugify(name) {
+      return (name || '').toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '');
     }
 
     function updateClock() {
@@ -428,7 +514,7 @@
     function renderTable(apps) {
       const tbody = $('#status-body');
       if (!apps || apps.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="11" class="empty-msg">No apps configured.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="7" class="empty-msg">No apps configured.</td></tr>';
         return;
       }
       tbody.innerHTML = apps.map(a => {
@@ -438,29 +524,28 @@
         const mLabel = methodMap[a.WatchMethod] || a.WatchMethod;
         const mColor = methodColorMap[a.WatchMethod] || 'method-process';
         const detail = watchDetail(a);
+        let startInfo = a.AutoStart ? 'Auto' : 'Watch only';
+        if (a.AutoStart && a.StartOrder > 0) startInfo += ' #' + a.StartOrder;
+        if (a.AutoStart && a.StartDelaySec > 0) startInfo += ' +' + a.StartDelaySec + 's';
         return `
         <tr class="${disabledClass}">
-          <td><code>${esc(a.ID)}</code></td>
-          <td>${esc(a.Name)}</td>
           <td>
-            <button class="actions ${toggleClass}" style="border:1px solid;padding:3px 10px;border-radius:4px;cursor:pointer;font-size:12px;"
-              onclick="toggleApp('${esc(a.ID)}')">${toggleLabel}</button>
+            ${esc(a.Name)}
+            <span class="cell-sub"><code>${esc(a.ID)}</code></span>
           </td>
           <td>
             <span class="method-badge ${mColor}">${mLabel}</span>
-            <span class="watch-detail">${esc(detail)}</span>
+            <span class="cell-sub">${esc(detail)} &middot; timeout ${a.TimeoutSec}s</span>
           </td>
           <td style="font-size:12px;">
-            ${a.AutoStart ? 'Auto' : 'Watch only'}
-            ${a.AutoStart && a.StartOrder > 0 ? '<br>#' + a.StartOrder : ''}
-            ${a.AutoStart && a.StartDelaySec > 0 ? ' +' + a.StartDelaySec + 's' : ''}
+            ${startInfo}
+            <span class="cell-sub">${formatSchedule(a.Schedule)}</span>
           </td>
-          <td style="font-size:12px;">${formatSchedule(a.Schedule)}</td>
           <td><span class="badge badge-${a.Status}">${a.Status}</span></td>
           <td class="pid">${a.PID || '-'}</td>
-          <td>${a.LastHeartbeat || '-'}</td>
-          <td>${a.TimeoutSec}s</td>
+          <td style="font-size:12px;">${a.LastHeartbeat || '-'}</td>
           <td class="actions">
+            <button class="${toggleClass}" onclick="toggleApp('${esc(a.ID)}')">${toggleLabel}</button>
             <button onclick="editApp('${esc(a.ID)}')">Edit</button>
             <button class="btn-delete" onclick="deleteApp('${esc(a.ID)}')">Delete</button>
           </td>
@@ -529,7 +614,7 @@
       const schedDays = Array.from(document.querySelectorAll('.sched-day:checked')).map(cb => cb.value);
 
       const payload = {
-        id: $('#f-id').value.trim(),
+        id: $('#f-id').value.trim() || slugify($('#f-name').value),
         name: $('#f-name').value.trim(),
         exe_path: $('#f-exe').value.trim(),
         args: parseArgs($('#f-args').value),
@@ -558,7 +643,7 @@
     async function saveApp() {
       const payload = buildPayload();
       if (!payload.id || !payload.exe_path || !payload.timeout_sec) {
-        alert('ID, Executable Path, Timeout are required.');
+        alert('Name, Executable Path, Timeout are required.');
         return;
       }
       if (payload.watch_method === 'udp' && !payload.watch_config.udp_port) {
@@ -627,6 +712,8 @@
       });
 
       onMethodChange();
+      const adv = document.querySelector('details.advanced');
+      if (adv) adv.open = true;
       $('#form-title').textContent = 'Edit App: ' + app.ID;
       $('#btn-save').textContent = 'Update App';
       $('#btn-cancel').style.display = '';
@@ -654,6 +741,8 @@
       $('#f-sched-stop').value = '';
       document.querySelectorAll('.sched-day').forEach(cb => cb.checked = false);
       onMethodChange();
+      const adv = document.querySelector('details.advanced');
+      if (adv) adv.open = false;
       $('#form-title').textContent = 'Add New App';
       $('#btn-save').textContent = 'Add App';
       $('#btn-cancel').style.display = 'none';

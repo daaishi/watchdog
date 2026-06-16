@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -108,6 +109,18 @@ var (
 	procFindWindowW    = user32.NewProc("FindWindowW")
 	procEnumWindows    = user32.NewProc("EnumWindows")
 	procGetWindowTextW = user32.NewProc("GetWindowTextW")
+
+	comdlg32            = syscall.NewLazyDLL("comdlg32.dll")
+	procGetOpenFileName = comdlg32.NewProc("GetOpenFileNameW")
+
+	shell32                 = syscall.NewLazyDLL("shell32.dll")
+	procSHBrowseForFolder   = shell32.NewProc("SHBrowseForFolderW")
+	procSHGetPathFromIDList = shell32.NewProc("SHGetPathFromIDListW")
+
+	ole32              = syscall.NewLazyDLL("ole32.dll")
+	procCoInitializeEx = ole32.NewProc("CoInitializeEx")
+	procCoUninitialize = ole32.NewProc("CoUninitialize")
+	procCoTaskMemFree  = ole32.NewProc("CoTaskMemFree")
 )
 
 // hideConsoleWindow hides the console window attached to this process.
@@ -132,6 +145,148 @@ func findWindowByTitle(title string) bool {
 	})
 	procEnumWindows.Call(cb, 0)
 	return found
+}
+
+// ---------------------------------------------------------------------------
+// Native file / folder picker dialogs (Windows)
+//
+// The Web UI runs on the same machine as the watched apps, so opening a native
+// dialog server-side lets the user pick a real absolute path instead of typing
+// it. (A browser <input type=file> only exposes a fake "C:\fakepath\" path.)
+// ---------------------------------------------------------------------------
+
+type openFileName struct {
+	lStructSize       uint32
+	hwndOwner         uintptr
+	hInstance         uintptr
+	lpstrFilter       *uint16
+	lpstrCustomFilter *uint16
+	nMaxCustFilter    uint32
+	nFilterIndex      uint32
+	lpstrFile         *uint16
+	nMaxFile          uint32
+	lpstrFileTitle    *uint16
+	nMaxFileTitle     uint32
+	lpstrInitialDir   *uint16
+	lpstrTitle        *uint16
+	flags             uint32
+	nFileOffset       uint16
+	nFileExtension    uint16
+	lpstrDefExt       *uint16
+	lCustData         uintptr
+	lpfnHook          uintptr
+	lpTemplateName    *uint16
+	pvReserved        uintptr
+	dwReserved        uint32
+	flagsEx           uint32
+}
+
+const (
+	ofnPathMustExist = 0x00000800
+	ofnFileMustExist = 0x00001000
+	ofnExplorer      = 0x00080000
+	ofnNoChangeDir   = 0x00000008
+)
+
+// buildFilter converts ["Programs","*.exe","All Files","*.*"] into the
+// double-NUL-terminated UTF-16 buffer that comdlg32 expects.
+func buildFilter(pairs []string) *uint16 {
+	var u []uint16
+	for _, s := range pairs {
+		p, err := syscall.UTF16FromString(s)
+		if err != nil {
+			continue
+		}
+		u = append(u, p...) // each includes a trailing NUL
+	}
+	u = append(u, 0) // final extra NUL terminates the list
+	return &u[0]
+}
+
+// pickFile shows a native "Open File" dialog and returns the chosen path,
+// or "" if the user cancelled.
+func pickFile(title string, filterPairs []string) string {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+
+	buf := make([]uint16, 4096)
+
+	var filter *uint16
+	if len(filterPairs) > 0 {
+		filter = buildFilter(filterPairs)
+	}
+	var titlePtr *uint16
+	if title != "" {
+		titlePtr, _ = syscall.UTF16PtrFromString(title)
+	}
+
+	ofn := openFileName{
+		lpstrFilter: filter,
+		lpstrFile:   &buf[0],
+		nMaxFile:    uint32(len(buf)),
+		lpstrTitle:  titlePtr,
+		flags:       ofnPathMustExist | ofnFileMustExist | ofnExplorer | ofnNoChangeDir,
+	}
+	ofn.lStructSize = uint32(unsafe.Sizeof(ofn))
+
+	ret, _, _ := procGetOpenFileName.Call(uintptr(unsafe.Pointer(&ofn)))
+	if ret == 0 {
+		return "" // cancelled or error
+	}
+	return syscall.UTF16ToString(buf)
+}
+
+type browseInfo struct {
+	hwndOwner      uintptr
+	pidlRoot       uintptr
+	pszDisplayName *uint16
+	lpszTitle      *uint16
+	ulFlags        uint32
+	lpfn           uintptr
+	lParam         uintptr
+	iImage         int32
+}
+
+const (
+	bifReturnOnlyFSDirs = 0x00000001
+	bifEditBox          = 0x00000010
+	bifNewDialogStyle   = 0x00000040
+	coinitApartment     = 0x2
+)
+
+// pickFolder shows a native "Browse For Folder" dialog and returns the chosen
+// directory, or "" if the user cancelled.
+func pickFolder(title string) string {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+
+	// BIF_NEWDIALOGSTYLE needs an apartment-threaded COM context.
+	procCoInitializeEx.Call(0, coinitApartment)
+	defer procCoUninitialize.Call()
+
+	var titlePtr *uint16
+	if title != "" {
+		titlePtr, _ = syscall.UTF16PtrFromString(title)
+	}
+	displayBuf := make([]uint16, 260)
+	bi := browseInfo{
+		pszDisplayName: &displayBuf[0],
+		lpszTitle:      titlePtr,
+		ulFlags:        bifReturnOnlyFSDirs | bifEditBox | bifNewDialogStyle,
+	}
+
+	pidl, _, _ := procSHBrowseForFolder.Call(uintptr(unsafe.Pointer(&bi)))
+	if pidl == 0 {
+		return "" // cancelled
+	}
+	defer procCoTaskMemFree.Call(pidl)
+
+	pathBuf := make([]uint16, 4096)
+	ret, _, _ := procSHGetPathFromIDList.Call(pidl, uintptr(unsafe.Pointer(&pathBuf[0])))
+	if ret == 0 {
+		return ""
+	}
+	return syscall.UTF16ToString(pathBuf)
 }
 
 // ---------------------------------------------------------------------------
@@ -310,44 +465,99 @@ func launchApp(cfg AppConfig, showConsole bool) (*exec.Cmd, error) {
 	return cmd, nil
 }
 
-func findPIDByExeAndArgs(exePath string, args []string) (int, error) {
-	exeName := filepath.Base(exePath)
-	cmd := exec.Command("wmic", "process", "where",
-		fmt.Sprintf("name='%s'", exeName),
-		"get", "ProcessId,CommandLine", "/FORMAT:CSV")
+// procInfo is a single running process as reported by Win32_Process.
+type procInfo struct {
+	pid     int
+	name    string
+	cmdline string
+}
+
+// enumProcesses lists running processes via PowerShell CIM. We use CIM instead
+// of wmic because wmic has been removed from recent Windows 11 builds.
+func enumProcesses() ([]procInfo, error) {
+	const sep = "\x1f" // unit separator — won't appear in paths/command lines
+	script := `Get-CimInstance Win32_Process | ForEach-Object { "$($_.ProcessId)` + sep +
+		`$($_.Name)` + sep + `$($_.CommandLine)" }`
+	cmd := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command", script)
+	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: 0x08000000} // CREATE_NO_WINDOW
 	out, err := cmd.Output()
 	if err != nil {
-		return 0, fmt.Errorf("wmic: %w", err)
+		return nil, fmt.Errorf("enum processes: %w", err)
 	}
 
-	var marker string
-	if len(args) > 0 {
-		marker = args[0]
-	}
-
-	lines := strings.Split(string(out), "\n")
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "Node") {
+	var procs []procInfo
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimRight(line, "\r")
+		if line == "" {
 			continue
 		}
-		if marker != "" && !strings.Contains(line, marker) {
-			continue
-		}
-		parts := strings.Split(line, ",")
+		parts := strings.SplitN(line, sep, 3)
 		if len(parts) < 2 {
 			continue
 		}
-		pidStr := strings.TrimSpace(parts[len(parts)-1])
-		pid, err := strconv.Atoi(pidStr)
+		pid, err := strconv.Atoi(strings.TrimSpace(parts[0]))
 		if err != nil {
 			continue
 		}
-		if pid > 0 {
-			return pid, nil
+		p := procInfo{pid: pid, name: parts[1]}
+		if len(parts) == 3 {
+			p.cmdline = parts[2]
 		}
+		procs = append(procs, p)
 	}
-	return 0, fmt.Errorf("process not found for %s with arg %q", exeName, marker)
+	return procs, nil
+}
+
+// discoverPID finds the PID of an app's process.
+//
+//   - For a shell-open document (e.g. a .mad / .toe file launched by file
+//     association) the real process is the host app (MadMapper.exe, launched
+//     with the document path on its command line), so we match by that path —
+//     NOT by the document's own file name.
+//   - For a directly-launched exe we match by image name, plus the first arg
+//     if present to disambiguate multiple instances.
+func discoverPID(cfg AppConfig) int {
+	procs, err := enumProcesses()
+	if err != nil {
+		log.Printf("[%s] process enumeration failed: %v", cfg.ID, err)
+		return 0
+	}
+	self := os.Getpid()
+
+	if cfg.UseShellOpen {
+		markers := []string{
+			strings.ToLower(cfg.ExePath),
+			strings.ToLower(filepath.Base(cfg.ExePath)),
+		}
+		for _, p := range procs {
+			if p.pid == self || strings.EqualFold(p.name, "cmd.exe") {
+				continue
+			}
+			cl := strings.ToLower(p.cmdline)
+			for _, m := range markers {
+				if m != "" && strings.Contains(cl, m) {
+					return p.pid
+				}
+			}
+		}
+		return 0
+	}
+
+	exeName := strings.ToLower(filepath.Base(cfg.ExePath))
+	var marker string
+	if len(cfg.Args) > 0 {
+		marker = strings.ToLower(cfg.Args[0])
+	}
+	for _, p := range procs {
+		if p.pid == self || !strings.EqualFold(p.name, exeName) {
+			continue
+		}
+		if marker != "" && !strings.Contains(strings.ToLower(p.cmdline), marker) {
+			continue
+		}
+		return p.pid
+	}
+	return 0
 }
 
 func killPID(pid int) error {
@@ -390,8 +600,8 @@ func (w *Watchdog) startApp(wa *WatchedApp) error {
 		go func() {
 			time.Sleep(5 * time.Second)
 			for i := 0; i < 6; i++ {
-				pid, err := findPIDByExeAndArgs(wa.Config.ExePath, wa.Config.Args)
-				if err == nil && pid > 0 {
+				pid := discoverPID(wa.Config)
+				if pid > 0 {
 					wa.mu.Lock()
 					wa.PID = pid
 					wa.Status = StatusRunning
@@ -835,19 +1045,7 @@ func (w *Watchdog) watchSchedule(wa *WatchedApp) {
 // findExistingPID tries to locate an already-running process by exe name
 // (and optionally args). Used when auto_start=false.
 func findExistingPID(cfg AppConfig) int {
-	// Try with args first (precise match).
-	if len(cfg.Args) > 0 {
-		pid, err := findPIDByExeAndArgs(cfg.ExePath, cfg.Args)
-		if err == nil && pid > 0 {
-			return pid
-		}
-	}
-	// Fallback: find any process matching the exe name.
-	pid, err := findPIDByExeAndArgs(cfg.ExePath, nil)
-	if err == nil && pid > 0 {
-		return pid
-	}
-	return 0
+	return discoverPID(cfg)
 }
 
 func (w *Watchdog) addAndStart(cfg AppConfig) error {
@@ -1268,6 +1466,23 @@ func (w *Watchdog) handleToggleApp(rw http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(rw).Encode(map[string]bool{"enabled": nowEnabled})
 }
 
+// handlePick opens a native file/folder dialog on the server (= local) machine
+// and returns the selected absolute path as JSON {"path": "..."}.
+func (w *Watchdog) handlePick(rw http.ResponseWriter, r *http.Request) {
+	var path string
+	switch r.URL.Query().Get("type") {
+	case "folder":
+		path = pickFolder("フォルダを選択")
+	case "exe":
+		path = pickFile("実行ファイルを選択",
+			[]string{"Programs (*.exe;*.bat;*.cmd)", "*.exe;*.bat;*.cmd", "All Files (*.*)", "*.*"})
+	default:
+		path = pickFile("ファイルを選択", []string{"All Files (*.*)", "*.*"})
+	}
+	rw.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(rw).Encode(map[string]string{"path": path})
+}
+
 func (w *Watchdog) handleShutdown(rw http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(rw, "method not allowed", http.StatusMethodNotAllowed)
@@ -1453,6 +1668,7 @@ func main() {
 	mux.HandleFunc("/api/settings", wd.handleSettings)
 	mux.HandleFunc("/api/app", wd.apiAppRouter)
 	mux.HandleFunc("/api/app/", wd.apiAppRouter)
+	mux.HandleFunc("/api/pick", wd.handlePick)
 	mux.HandleFunc("/api/shutdown", wd.handleShutdown)
 
 	addr := fmt.Sprintf(":%d", wd.config.WebPort)

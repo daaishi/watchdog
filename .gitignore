@@ -3,6 +3,9 @@
 dist/
 *.zip
 
+# Runtime output
+logs/
+
 # IDE / editor
 .vscode/
 .idea/
