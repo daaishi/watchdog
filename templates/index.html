@@ -362,6 +362,10 @@
           <input type="checkbox" id="f-shell">
           <label for="f-shell" style="margin:0">Use shell open (for .toe files)</label>
         </div>
+        <div class="checkbox-row">
+          <input type="checkbox" id="f-graceful">
+          <label for="f-graceful" style="margin:0">停止時に保存してから終了 (Ctrl+S → Alt+F4)</label>
+        </div>
 
         <!-- Schedule -->
         <div class="full" style="margin-top:8px;border-top:1px solid #253545;padding-top:12px;">
@@ -625,6 +629,7 @@
         auto_start: $('#f-autostart').checked,
         start_order: parseInt($('#f-order').value) || 0,
         start_delay_sec: parseInt($('#f-delay').value) || 0,
+        stop_mode: $('#f-graceful').checked ? 'graceful' : 'force',
       };
 
       if (schedStart && schedStop) {
@@ -703,6 +708,7 @@
       $('#f-autostart').checked = app.AutoStart;
       $('#f-order').value = app.StartOrder || 0;
       $('#f-delay').value = app.StartDelaySec || 0;
+      $('#f-graceful').checked = app.StopMode === 'graceful';
 
       const sched = app.Schedule;
       $('#f-sched-start').value = sched ? sched.start_time || '' : '';
@@ -737,6 +743,7 @@
       $('#f-autostart').checked = true;
       $('#f-order').value = '0';
       $('#f-delay').value = '0';
+      $('#f-graceful').checked = false;
       $('#f-sched-start').value = '';
       $('#f-sched-stop').value = '';
       document.querySelectorAll('.sched-day').forEach(cb => cb.checked = false);

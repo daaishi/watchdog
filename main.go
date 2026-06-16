@@ -101,14 +101,22 @@ func (w *dateRotatingWriter) Close() error {
 // ---------------------------------------------------------------------------
 
 var (
-	kernel32            = syscall.NewLazyDLL("kernel32.dll")
-	procGetConsoleWindow = kernel32.NewProc("GetConsoleWindow")
+	kernel32              = syscall.NewLazyDLL("kernel32.dll")
+	procGetConsoleWindow  = kernel32.NewProc("GetConsoleWindow")
+	procGetCurrentThreadId = kernel32.NewProc("GetCurrentThreadId")
 
-	user32             = syscall.NewLazyDLL("user32.dll")
-	procShowWindow     = user32.NewProc("ShowWindow")
-	procFindWindowW    = user32.NewProc("FindWindowW")
-	procEnumWindows    = user32.NewProc("EnumWindows")
-	procGetWindowTextW = user32.NewProc("GetWindowTextW")
+	user32                       = syscall.NewLazyDLL("user32.dll")
+	procShowWindow               = user32.NewProc("ShowWindow")
+	procFindWindowW              = user32.NewProc("FindWindowW")
+	procEnumWindows              = user32.NewProc("EnumWindows")
+	procGetWindowTextW           = user32.NewProc("GetWindowTextW")
+	procGetWindowThreadProcessId = user32.NewProc("GetWindowThreadProcessId")
+	procIsWindowVisible          = user32.NewProc("IsWindowVisible")
+	procSetForegroundWindow      = user32.NewProc("SetForegroundWindow")
+	procGetForegroundWindow      = user32.NewProc("GetForegroundWindow")
+	procBringWindowToTop         = user32.NewProc("BringWindowToTop")
+	procAttachThreadInput        = user32.NewProc("AttachThreadInput")
+	procKeybdEvent               = user32.NewProc("keybd_event")
 
 	comdlg32            = syscall.NewLazyDLL("comdlg32.dll")
 	procGetOpenFileName = comdlg32.NewProc("GetOpenFileNameW")
@@ -337,6 +345,10 @@ type AppConfig struct {
 	StartOrder    int             `json:"start_order"`
 	StartDelaySec int             `json:"start_delay_sec"`
 	Schedule      *ScheduleConfig `json:"schedule,omitempty"`
+	// StopMode controls how the process is stopped on schedule/manual stop:
+	//   "" or "force" -> taskkill (immediate)
+	//   "graceful"    -> send Ctrl+S (save) then Alt+F4 (quit), force-kill as fallback
+	StopMode string `json:"stop_mode,omitempty"`
 }
 
 type Config struct {
@@ -563,6 +575,121 @@ func discoverPID(cfg AppConfig) int {
 func killPID(pid int) error {
 	cmd := exec.Command("taskkill", "/F", "/PID", strconv.Itoa(pid))
 	return cmd.Run()
+}
+
+// findMainWindowByPID returns the first visible top-level window owned by pid,
+// or 0 if none is found.
+func findMainWindowByPID(pid int) uintptr {
+	var target uintptr
+	cb := syscall.NewCallback(func(hwnd uintptr, lParam uintptr) uintptr {
+		var wpid uint32
+		procGetWindowThreadProcessId.Call(hwnd, uintptr(unsafe.Pointer(&wpid)))
+		if int(wpid) == pid {
+			if vis, _, _ := procIsWindowVisible.Call(hwnd); vis != 0 {
+				target = hwnd
+				return 0 // stop enumeration
+			}
+		}
+		return 1 // continue
+	})
+	procEnumWindows.Call(cb, 0)
+	return target
+}
+
+// focusWindow brings hwnd to the foreground and confirms it actually became
+// the foreground window. It uses the AttachThreadInput trick to bypass
+// Windows' foreground-lock (which otherwise blocks SetForegroundWindow from a
+// background process). Returns false if focus could not be confirmed — in which
+// case the caller MUST NOT send keystrokes (they would land on another app).
+func focusWindow(hwnd uintptr) bool {
+	const swRestore = 9
+
+	// Fast path: already the foreground window (typical on a kiosk).
+	if fg, _, _ := procGetForegroundWindow.Call(); fg == hwnd {
+		return true
+	}
+
+	// AttachThreadInput requires stable thread identity for the duration.
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+
+	fg, _, _ := procGetForegroundWindow.Call()
+	myThread, _, _ := procGetCurrentThreadId.Call()
+	var fgThread uintptr
+	if fg != 0 {
+		fgThread, _, _ = procGetWindowThreadProcessId.Call(fg, 0)
+	}
+
+	attached := false
+	if fgThread != 0 && fgThread != myThread {
+		if ok, _, _ := procAttachThreadInput.Call(myThread, fgThread, 1); ok != 0 {
+			attached = true
+		}
+	}
+
+	procShowWindow.Call(hwnd, swRestore)
+	procBringWindowToTop.Call(hwnd)
+	procSetForegroundWindow.Call(hwnd)
+
+	if attached {
+		procAttachThreadInput.Call(myThread, fgThread, 0)
+	}
+
+	for i := 0; i < 10; i++ {
+		if f, _, _ := procGetForegroundWindow.Call(); f == hwnd {
+			return true
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return false
+}
+
+// sendCtrlS synthesizes a Ctrl+S keystroke to the foreground window.
+func sendCtrlS() {
+	const (
+		vkControl = 0x11
+		vkS       = 0x53
+		keyUp     = 0x0002
+	)
+	procKeybdEvent.Call(vkControl, 0, 0, 0)
+	procKeybdEvent.Call(vkS, 0, 0, 0)
+	procKeybdEvent.Call(vkS, 0, keyUp, 0)
+	procKeybdEvent.Call(vkControl, 0, keyUp, 0)
+}
+
+// gracefulSave focuses the app's own window and sends Ctrl+S so it saves before
+// being terminated. Ctrl+S is sent ONLY after confirming the app's window is
+// the foreground window, so a stray keystroke can never reach another app
+// (e.g. the terminal). It deliberately does NOT send Alt+F4 — the caller stops
+// the process by PID, which is reliable and, since we saved first, data-safe.
+func gracefulSave(cfg AppConfig, pid int) {
+	hwnd := findMainWindowByPID(pid)
+	if hwnd == 0 {
+		log.Printf("[%s] graceful: no visible window for PID %d; skipping save", cfg.ID, pid)
+		return
+	}
+	if !focusWindow(hwnd) {
+		log.Printf("[%s] graceful: could not focus window; skipping Ctrl+S to avoid stray keystrokes", cfg.ID)
+		return
+	}
+	time.Sleep(300 * time.Millisecond)
+	sendCtrlS()
+	log.Printf("[%s] graceful: sent Ctrl+S, waiting for save to complete ...", cfg.ID)
+	time.Sleep(3 * time.Second)
+}
+
+// stopProcess stops a running app's process honoring its StopMode. For
+// "graceful" it saves first (Ctrl+S to the app's own focused window), then
+// terminates by PID. Any other mode terminates immediately.
+func stopProcess(cfg AppConfig, pid int) {
+	if pid <= 0 {
+		return
+	}
+	if cfg.StopMode == "graceful" {
+		log.Printf("[%s] Graceful stop (PID %d): save then quit", cfg.ID, pid)
+		gracefulSave(cfg, pid)
+	}
+	killPID(pid)
 }
 
 // isProcessAlive checks whether a PID is still running using the Windows
@@ -1022,9 +1149,7 @@ func (w *Watchdog) watchSchedule(wa *WatchedApp) {
 				wa.Status = StatusStopped
 				wa.PID = 0
 				wa.mu.Unlock()
-				if pid > 0 {
-					killPID(pid)
-				}
+				stopProcess(wa.Config, pid)
 				scheduledStop = true
 			} else if inSched && scheduledStop {
 				log.Printf("[%s] Inside schedule (%s-%s), starting",
@@ -1138,6 +1263,7 @@ func (w *Watchdog) stopApp(id string) {
 		close(wa.stopCh)
 	}
 	pid := wa.PID
+	cfg := wa.Config
 	if wa.udpConn != nil {
 		wa.udpConn.Close()
 	}
@@ -1145,7 +1271,7 @@ func (w *Watchdog) stopApp(id string) {
 
 	if pid > 0 {
 		log.Printf("[%s] Stopping PID %d ...", id, pid)
-		killPID(pid)
+		stopProcess(cfg, pid)
 	}
 }
 
@@ -1205,6 +1331,7 @@ type AppStatusView struct {
 	StartOrder    int
 	StartDelaySec int
 	Schedule      *ScheduleConfig
+	StopMode      string
 	PID           int
 	Status        string
 	LastHeartbeat string
@@ -1267,6 +1394,7 @@ func (w *Watchdog) getStatusViews() []AppStatusView {
 			StartOrder:    cfg.StartOrder,
 			StartDelaySec: cfg.StartDelaySec,
 			Schedule:      cfg.Schedule,
+			StopMode:      cfg.StopMode,
 			Status:        "disabled",
 		}
 		if !cfg.Enabled {
