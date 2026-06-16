@@ -362,9 +362,34 @@
           <input type="checkbox" id="f-shell">
           <label for="f-shell" style="margin:0">Use shell open (for .toe files)</label>
         </div>
-        <div class="checkbox-row">
-          <input type="checkbox" id="f-graceful">
-          <label for="f-graceful" style="margin:0">停止時に保存してから終了 (Ctrl+S → Alt+F4)</label>
+        <div>
+          <label for="f-stopmode">停止方法 (Stop mode)</label>
+          <select id="f-stopmode" onchange="onStopModeChange()">
+            <option value="force">強制終了 (即 taskkill)</option>
+            <option value="graceful">保存して終了：キー送信 (Ctrl+S)</option>
+            <option value="osc">保存して終了：OSC送信</option>
+          </select>
+        </div>
+        <div class="full" id="osc-fields" style="display:none;">
+          <div class="form-grid">
+            <div>
+              <label for="f-osc-host">OSC Host</label>
+              <input type="text" id="f-osc-host" placeholder="127.0.0.1">
+            </div>
+            <div>
+              <label for="f-osc-port">OSC Port</label>
+              <input type="number" id="f-osc-port" placeholder="8010">
+            </div>
+            <div class="full">
+              <label for="f-osc-save">Save アドレス</label>
+              <input type="text" id="f-osc-save" placeholder="/mmServer/global/save">
+            </div>
+            <div class="full">
+              <label for="f-osc-quit">Quit アドレス（判明したら入力）</label>
+              <input type="text" id="f-osc-quit" placeholder="(空欄=保存後にPIDで終了)">
+              <div class="hint">空欄なら OSCで保存→PIDで終了。終了アドレスが判明したら入れると OSCで終了します。</div>
+            </div>
+          </div>
         </div>
 
         <!-- Schedule -->
@@ -481,6 +506,11 @@
       if (target) target.classList.add('active');
     }
     onMethodChange();
+
+    function onStopModeChange() {
+      $('#osc-fields').style.display = $('#f-stopmode').value === 'osc' ? '' : 'none';
+    }
+    onStopModeChange();
 
     async function fetchStatus() {
       try {
@@ -629,7 +659,11 @@
         auto_start: $('#f-autostart').checked,
         start_order: parseInt($('#f-order').value) || 0,
         start_delay_sec: parseInt($('#f-delay').value) || 0,
-        stop_mode: $('#f-graceful').checked ? 'graceful' : 'force',
+        stop_mode: $('#f-stopmode').value,
+        osc_host: $('#f-osc-host').value.trim(),
+        osc_port: parseInt($('#f-osc-port').value) || 0,
+        osc_save_addr: $('#f-osc-save').value.trim(),
+        osc_quit_addr: $('#f-osc-quit').value.trim(),
       };
 
       if (schedStart && schedStop) {
@@ -708,7 +742,12 @@
       $('#f-autostart').checked = app.AutoStart;
       $('#f-order').value = app.StartOrder || 0;
       $('#f-delay').value = app.StartDelaySec || 0;
-      $('#f-graceful').checked = app.StopMode === 'graceful';
+      $('#f-stopmode').value = app.StopMode || 'force';
+      $('#f-osc-host').value = app.OSCHost || '';
+      $('#f-osc-port').value = app.OSCPort || '';
+      $('#f-osc-save').value = app.OSCSaveAddr || '';
+      $('#f-osc-quit').value = app.OSCQuitAddr || '';
+      onStopModeChange();
 
       const sched = app.Schedule;
       $('#f-sched-start').value = sched ? sched.start_time || '' : '';
@@ -743,7 +782,12 @@
       $('#f-autostart').checked = true;
       $('#f-order').value = '0';
       $('#f-delay').value = '0';
-      $('#f-graceful').checked = false;
+      $('#f-stopmode').value = 'force';
+      $('#f-osc-host').value = '';
+      $('#f-osc-port').value = '';
+      $('#f-osc-save').value = '';
+      $('#f-osc-quit').value = '';
+      onStopModeChange();
       $('#f-sched-start').value = '';
       $('#f-sched-stop').value = '';
       document.querySelectorAll('.sched-day').forEach(cb => cb.checked = false);

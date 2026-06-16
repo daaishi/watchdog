@@ -347,8 +347,15 @@ type AppConfig struct {
 	Schedule      *ScheduleConfig `json:"schedule,omitempty"`
 	// StopMode controls how the process is stopped on schedule/manual stop:
 	//   "" or "force" -> taskkill (immediate)
-	//   "graceful"    -> send Ctrl+S (save) then Alt+F4 (quit), force-kill as fallback
+	//   "graceful"    -> focus window, send Ctrl+S (save), then terminate by PID
+	//   "osc"         -> send an OSC save (and optional quit) message, then
+	//                    terminate by PID as a fallback
 	StopMode string `json:"stop_mode,omitempty"`
+	// OSC stop settings (used when StopMode == "osc").
+	OSCHost     string `json:"osc_host,omitempty"`      // default 127.0.0.1
+	OSCPort     int    `json:"osc_port,omitempty"`      // default 8010
+	OSCSaveAddr string `json:"osc_save_addr,omitempty"` // default /mmServer/global/save
+	OSCQuitAddr string `json:"osc_quit_addr,omitempty"` // blank = save then PID-kill
 }
 
 type Config struct {
@@ -678,16 +685,94 @@ func gracefulSave(cfg AppConfig, pid int) {
 	time.Sleep(3 * time.Second)
 }
 
-// stopProcess stops a running app's process honoring its StopMode. For
-// "graceful" it saves first (Ctrl+S to the app's own focused window), then
-// terminates by PID. Any other mode terminates immediately.
+// oscPad null-terminates an OSC string and pads it to a 4-byte boundary.
+func oscPad(s string) []byte {
+	b := append([]byte(s), 0)
+	for len(b)%4 != 0 {
+		b = append(b, 0)
+	}
+	return b
+}
+
+// sendOSC sends a no-argument OSC message to host:port over UDP.
+func sendOSC(host string, port int, addr string) error {
+	if addr == "" {
+		return nil
+	}
+	raddr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("%s:%d", host, port))
+	if err != nil {
+		return err
+	}
+	conn, err := net.DialUDP("udp", nil, raddr)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	msg := append(oscPad(addr), oscPad(",")...) // address + empty type-tag string
+	_, err = conn.Write(msg)
+	return err
+}
+
+// oscStop saves (and optionally quits) the app over OSC. Sending OSC does not
+// depend on window focus, so unlike the keystroke path it can never disturb
+// another window. It always returns; the caller force-kills as a fallback.
+func oscStop(cfg AppConfig, pid int) {
+	host := cfg.OSCHost
+	if host == "" {
+		host = "127.0.0.1"
+	}
+	port := cfg.OSCPort
+	if port == 0 {
+		port = 8010
+	}
+	saveAddr := cfg.OSCSaveAddr
+	if saveAddr == "" {
+		saveAddr = "/mmServer/global/save"
+	}
+
+	if err := sendOSC(host, port, saveAddr); err != nil {
+		log.Printf("[%s] OSC save send failed: %v", cfg.ID, err)
+	} else {
+		log.Printf("[%s] OSC save sent (%s -> %s:%d); waiting for save ...", cfg.ID, saveAddr, host, port)
+	}
+	time.Sleep(3 * time.Second)
+
+	if cfg.OSCQuitAddr != "" {
+		if err := sendOSC(host, port, cfg.OSCQuitAddr); err != nil {
+			log.Printf("[%s] OSC quit send failed: %v", cfg.ID, err)
+		} else {
+			log.Printf("[%s] OSC quit sent (%s); waiting for exit ...", cfg.ID, cfg.OSCQuitAddr)
+		}
+		deadline := time.Now().Add(15 * time.Second)
+		for time.Now().Before(deadline) {
+			if !isProcessAlive(pid) {
+				log.Printf("[%s] Exited via OSC quit (PID %d)", cfg.ID, pid)
+				return
+			}
+			time.Sleep(1 * time.Second)
+		}
+		log.Printf("[%s] Still alive after OSC quit; forcing kill", cfg.ID)
+	}
+}
+
+// stopProcess stops a running app's process honoring its StopMode:
+//   - "graceful": focus the app's window and send Ctrl+S, then terminate by PID.
+//   - "osc": send an OSC save (and optional quit) message, then terminate by PID.
+//   - anything else: terminate immediately.
+//
+// In every mode the process is ultimately terminated by PID, which is reliable
+// and — because we save first — data-safe.
 func stopProcess(cfg AppConfig, pid int) {
 	if pid <= 0 {
 		return
 	}
-	if cfg.StopMode == "graceful" {
-		log.Printf("[%s] Graceful stop (PID %d): save then quit", cfg.ID, pid)
+	switch cfg.StopMode {
+	case "graceful":
+		log.Printf("[%s] Graceful stop (PID %d): save (keys) then quit", cfg.ID, pid)
 		gracefulSave(cfg, pid)
+	case "osc":
+		log.Printf("[%s] OSC stop (PID %d): save (OSC) then quit", cfg.ID, pid)
+		oscStop(cfg, pid)
 	}
 	killPID(pid)
 }
@@ -695,14 +780,32 @@ func stopProcess(cfg AppConfig, pid int) {
 // isProcessAlive checks whether a PID is still running using the Windows
 // OpenProcess API. This is more reliable than parsing tasklist output which
 // can vary by locale.
+//
+// IMPORTANT: a successful OpenProcess is NOT proof the process is still running.
+// A process object lingers as long as any handle to it remains open — which is
+// common for apps launched via the shell / file association (e.g. MadMapper via
+// a .mad file). In that case OpenProcess keeps succeeding after the app is
+// closed, so we must additionally verify the process hasn't been signaled
+// (exited) and that its exit code is still STILL_ACTIVE.
 func isProcessAlive(pid int) bool {
-	const PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-	h, err := syscall.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))
+	const processQueryLimitedInformation = 0x1000
+	h, err := syscall.OpenProcess(processQueryLimitedInformation, false, uint32(pid))
 	if err != nil {
 		return false
 	}
-	syscall.CloseHandle(h)
-	return true
+	defer syscall.CloseHandle(h)
+
+	// GetExitCodeProcess works with PROCESS_QUERY_LIMITED_INFORMATION and does
+	// not require SYNCHRONIZE access (which WaitForSingleObject would). A running
+	// process reports STILL_ACTIVE; a process that has already exited reports its
+	// real exit code even while its handle lingers, so this correctly detects a
+	// closed app whose process object is kept alive by another open handle.
+	const stillActive = 259 // STILL_ACTIVE
+	var code uint32
+	if err := syscall.GetExitCodeProcess(h, &code); err != nil {
+		return false
+	}
+	return code == stillActive
 }
 
 // ---------------------------------------------------------------------------
@@ -1332,6 +1435,10 @@ type AppStatusView struct {
 	StartDelaySec int
 	Schedule      *ScheduleConfig
 	StopMode      string
+	OSCHost       string
+	OSCPort       int
+	OSCSaveAddr   string
+	OSCQuitAddr   string
 	PID           int
 	Status        string
 	LastHeartbeat string
@@ -1395,6 +1502,10 @@ func (w *Watchdog) getStatusViews() []AppStatusView {
 			StartDelaySec: cfg.StartDelaySec,
 			Schedule:      cfg.Schedule,
 			StopMode:      cfg.StopMode,
+			OSCHost:       cfg.OSCHost,
+			OSCPort:       cfg.OSCPort,
+			OSCSaveAddr:   cfg.OSCSaveAddr,
+			OSCQuitAddr:   cfg.OSCQuitAddr,
 			Status:        "disabled",
 		}
 		if !cfg.Enabled {
