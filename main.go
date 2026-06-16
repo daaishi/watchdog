@@ -1,12 +1,17 @@
 package main
 
 import (
+	"bufio"
 	"context"
+	"crypto/md5"
 	_ "embed"
+	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"html/template"
 	"log"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -358,13 +363,37 @@ type AppConfig struct {
 	OSCQuitAddr string `json:"osc_quit_addr,omitempty"` // blank = save then PID-kill
 }
 
+// CommandConfig is a network command (UDP / OSC / PJLINK) fired at a scheduled
+// time, and also manually via the "Test" button.
+type CommandConfig struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	Type string `json:"type"` // "udp" | "osc" | "pjlink"
+	Host string `json:"host"`
+	Port int    `json:"port"`
+	// UDP
+	Payload    string `json:"payload,omitempty"`
+	PayloadHex bool   `json:"payload_hex,omitempty"`
+	// OSC
+	OSCAddr string `json:"osc_addr,omitempty"`
+	OSCArgs string `json:"osc_args,omitempty"` // space-separated; int/float/string auto-typed
+	// PJLINK
+	PJCommand  string `json:"pj_command,omitempty"`  // e.g. "POWR 1"
+	PJPassword string `json:"pj_password,omitempty"` // blank = no auth
+	// Schedule
+	Time    string   `json:"time"`           // "HH:MM"; blank = manual only
+	Days    []string `json:"days,omitempty"` // empty = every day
+	Enabled bool     `json:"enabled"`
+}
+
 type Config struct {
-	WebPort     int         `json:"web_port"`
-	ShowConsole bool        `json:"show_console"`
-	LogDir      string      `json:"log_dir"`
-	RebootTime  string      `json:"reboot_time,omitempty"`
-	RebootDays  []string    `json:"reboot_days,omitempty"`
-	Apps        []AppConfig `json:"apps"`
+	WebPort     int             `json:"web_port"`
+	ShowConsole bool            `json:"show_console"`
+	LogDir      string          `json:"log_dir"`
+	RebootTime  string          `json:"reboot_time,omitempty"`
+	RebootDays  []string        `json:"reboot_days,omitempty"`
+	Apps        []AppConfig     `json:"apps"`
+	Commands    []CommandConfig `json:"commands,omitempty"`
 }
 
 // ---------------------------------------------------------------------------
@@ -1417,6 +1446,189 @@ func (w *Watchdog) stopAll() {
 }
 
 // ---------------------------------------------------------------------------
+// Scheduled network commands: UDP / OSC / PJLINK
+// ---------------------------------------------------------------------------
+
+// sendUDPRaw sends a raw UDP payload (text, or hex-decoded when isHex).
+func sendUDPRaw(host string, port int, payload string, isHex bool) error {
+	var data []byte
+	if isHex {
+		clean := strings.NewReplacer(" ", "", "\t", "", "\r", "", "\n", "").Replace(payload)
+		b, err := hex.DecodeString(clean)
+		if err != nil {
+			return fmt.Errorf("invalid hex payload: %w", err)
+		}
+		data = b
+	} else {
+		data = []byte(payload)
+	}
+	raddr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("%s:%d", host, port))
+	if err != nil {
+		return err
+	}
+	conn, err := net.DialUDP("udp", nil, raddr)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	_, err = conn.Write(data)
+	return err
+}
+
+// sendOSCMessage builds and sends an OSC message with auto-typed arguments
+// (integer -> i, float -> f, otherwise string).
+func sendOSCMessage(host string, port int, addr, argStr string) error {
+	if addr == "" {
+		return fmt.Errorf("OSC address is empty")
+	}
+	tags := ","
+	var argBytes []byte
+	for _, a := range strings.Fields(argStr) {
+		if iv, err := strconv.ParseInt(a, 10, 32); err == nil {
+			tags += "i"
+			var b [4]byte
+			binary.BigEndian.PutUint32(b[:], uint32(int32(iv)))
+			argBytes = append(argBytes, b[:]...)
+		} else if fv, err := strconv.ParseFloat(a, 32); err == nil {
+			tags += "f"
+			var b [4]byte
+			binary.BigEndian.PutUint32(b[:], math.Float32bits(float32(fv)))
+			argBytes = append(argBytes, b[:]...)
+		} else {
+			tags += "s"
+			argBytes = append(argBytes, oscPad(a)...)
+		}
+	}
+	msg := append(oscPad(addr), oscPad(tags)...)
+	msg = append(msg, argBytes...)
+
+	raddr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("%s:%d", host, port))
+	if err != nil {
+		return err
+	}
+	conn, err := net.DialUDP("udp", nil, raddr)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	_, err = conn.Write(msg)
+	return err
+}
+
+// sendPJLink connects to a PJLink (class 1) device over TCP, performs the
+// greeting / optional MD5 authentication handshake, sends the command and
+// returns the device's response line.
+func sendPJLink(host string, port int, password, command string) (string, error) {
+	if port == 0 {
+		port = 4352
+	}
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("%s:%d", host, port), 5*time.Second)
+	if err != nil {
+		return "", err
+	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(5 * time.Second))
+
+	reader := bufio.NewReader(conn)
+	greeting, err := reader.ReadString('\r')
+	if err != nil {
+		return "", fmt.Errorf("read greeting: %w", err)
+	}
+	var authPrefix string
+	fields := strings.Fields(strings.TrimRight(greeting, "\r\n"))
+	if len(fields) >= 2 && strings.EqualFold(fields[0], "PJLINK") {
+		if fields[1] == "1" { // authentication required
+			if len(fields) < 3 {
+				return "", fmt.Errorf("auth required but no nonce in greeting")
+			}
+			sum := md5.Sum([]byte(fields[2] + password))
+			authPrefix = hex.EncodeToString(sum[:])
+		}
+	}
+
+	cmd := strings.TrimSpace(command)
+	if !strings.HasPrefix(cmd, "%") {
+		cmd = "%1" + cmd // class-1 prefix
+	}
+	if _, err := conn.Write([]byte(authPrefix + cmd + "\r")); err != nil {
+		return "", err
+	}
+	resp, err := reader.ReadString('\r')
+	if err != nil {
+		return strings.TrimRight(resp, "\r\n"), fmt.Errorf("read response: %w", err)
+	}
+	return strings.TrimRight(resp, "\r\n"), nil
+}
+
+// fireCommand executes a command and returns a human-readable result string.
+func fireCommand(cmd CommandConfig) (string, error) {
+	switch cmd.Type {
+	case "udp":
+		if err := sendUDPRaw(cmd.Host, cmd.Port, cmd.Payload, cmd.PayloadHex); err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("UDP sent to %s:%d", cmd.Host, cmd.Port), nil
+	case "osc":
+		if err := sendOSCMessage(cmd.Host, cmd.Port, cmd.OSCAddr, cmd.OSCArgs); err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("OSC %s sent to %s:%d", cmd.OSCAddr, cmd.Host, cmd.Port), nil
+	case "pjlink":
+		resp, err := sendPJLink(cmd.Host, cmd.Port, cmd.PJPassword, cmd.PJCommand)
+		if err != nil {
+			return resp, err
+		}
+		return "PJLINK response: " + resp, nil
+	default:
+		return "", fmt.Errorf("unknown command type %q", cmd.Type)
+	}
+}
+
+// watchCommands fires enabled scheduled commands at their configured time/days.
+func (w *Watchdog) watchCommands() {
+	ticker := time.NewTicker(20 * time.Second)
+	defer ticker.Stop()
+
+	lastFired := make(map[string]string) // id -> "2006-01-02 15:04"
+
+	for {
+		select {
+		case <-w.shutdownCh:
+			return
+		case <-ticker.C:
+			now := time.Now()
+			stamp := now.Format("2006-01-02 15:04")
+
+			w.mu.RLock()
+			cmds := make([]CommandConfig, len(w.config.Commands))
+			copy(cmds, w.config.Commands)
+			w.mu.RUnlock()
+
+			for _, c := range cmds {
+				if !c.Enabled || c.Time == "" {
+					continue
+				}
+				ch, cm, err := parseHHMM(c.Time)
+				if err != nil || now.Hour() != ch || now.Minute() != cm {
+					continue
+				}
+				if !isDayMatch(c.Days, now) || lastFired[c.ID] == stamp {
+					continue
+				}
+				lastFired[c.ID] = stamp
+				go func(cmd CommandConfig) {
+					if res, err := fireCommand(cmd); err != nil {
+						log.Printf("[cmd:%s] fire failed: %v", cmd.ID, err)
+					} else {
+						log.Printf("[cmd:%s] fired (%s): %s", cmd.ID, cmd.Type, res)
+					}
+				}(c)
+			}
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Web UI – HTTP handlers
 // ---------------------------------------------------------------------------
 
@@ -1546,12 +1758,15 @@ func (w *Watchdog) handleAPIStatus(rw http.ResponseWriter, r *http.Request) {
 		"reboot_time": w.config.RebootTime,
 		"reboot_days": w.config.RebootDays,
 	}
+	cmds := make([]CommandConfig, len(w.config.Commands))
+	copy(cmds, w.config.Commands)
 	w.mu.RUnlock()
 
 	rw.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(rw).Encode(map[string]interface{}{
 		"apps":     w.getStatusViews(),
 		"settings": settings,
+		"commands": cmds,
 	})
 }
 
@@ -1832,6 +2047,124 @@ func (w *Watchdog) watchReboot() {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// Scheduled command handlers
+// ---------------------------------------------------------------------------
+
+func (w *Watchdog) handleFireCommand(rw http.ResponseWriter, r *http.Request) {
+	var cmd CommandConfig
+	if err := json.NewDecoder(r.Body).Decode(&cmd); err != nil {
+		http.Error(rw, err.Error(), http.StatusBadRequest)
+		return
+	}
+	res, err := fireCommand(cmd)
+	rw.Header().Set("Content-Type", "application/json")
+	out := map[string]interface{}{"ok": err == nil, "result": res}
+	if err != nil {
+		out["error"] = err.Error()
+	}
+	json.NewEncoder(rw).Encode(out)
+}
+
+func (w *Watchdog) handleAddCommand(rw http.ResponseWriter, r *http.Request) {
+	var cmd CommandConfig
+	if err := json.NewDecoder(r.Body).Decode(&cmd); err != nil {
+		http.Error(rw, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if cmd.ID == "" || cmd.Name == "" || cmd.Type == "" || cmd.Host == "" {
+		http.Error(rw, "id, name, type, host are required", http.StatusBadRequest)
+		return
+	}
+	w.mu.Lock()
+	for _, c := range w.config.Commands {
+		if c.ID == cmd.ID {
+			w.mu.Unlock()
+			http.Error(rw, "duplicate id", http.StatusConflict)
+			return
+		}
+	}
+	w.config.Commands = append(w.config.Commands, cmd)
+	w.saveConfig()
+	w.mu.Unlock()
+	rw.WriteHeader(http.StatusCreated)
+}
+
+func (w *Watchdog) handleEditCommand(rw http.ResponseWriter, r *http.Request) {
+	id := strings.TrimPrefix(r.URL.Path, "/api/command/")
+	if id == "" {
+		http.Error(rw, "missing id", http.StatusBadRequest)
+		return
+	}
+	var cmd CommandConfig
+	if err := json.NewDecoder(r.Body).Decode(&cmd); err != nil {
+		http.Error(rw, err.Error(), http.StatusBadRequest)
+		return
+	}
+	cmd.ID = id
+	w.mu.Lock()
+	found := false
+	for i, c := range w.config.Commands {
+		if c.ID == id {
+			w.config.Commands[i] = cmd
+			found = true
+			break
+		}
+	}
+	if !found {
+		w.mu.Unlock()
+		http.Error(rw, "not found", http.StatusNotFound)
+		return
+	}
+	w.saveConfig()
+	w.mu.Unlock()
+	rw.WriteHeader(http.StatusOK)
+}
+
+func (w *Watchdog) handleDeleteCommand(rw http.ResponseWriter, r *http.Request) {
+	id := strings.TrimPrefix(r.URL.Path, "/api/command/")
+	if id == "" {
+		http.Error(rw, "missing id", http.StatusBadRequest)
+		return
+	}
+	w.mu.Lock()
+	newCmds := make([]CommandConfig, 0, len(w.config.Commands))
+	for _, c := range w.config.Commands {
+		if c.ID != id {
+			newCmds = append(newCmds, c)
+		}
+	}
+	w.config.Commands = newCmds
+	w.saveConfig()
+	w.mu.Unlock()
+	rw.WriteHeader(http.StatusOK)
+}
+
+func (w *Watchdog) apiCommandRouter(rw http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodPost:
+		if r.URL.Path == "/api/command/fire" {
+			w.handleFireCommand(rw, r)
+			return
+		}
+		if r.URL.Path == "/api/command" || r.URL.Path == "/api/command/" {
+			w.handleAddCommand(rw, r)
+			return
+		}
+	case http.MethodPut:
+		if strings.HasPrefix(r.URL.Path, "/api/command/") {
+			w.handleEditCommand(rw, r)
+			return
+		}
+	case http.MethodDelete:
+		if strings.HasPrefix(r.URL.Path, "/api/command/") {
+			w.handleDeleteCommand(rw, r)
+			return
+		}
+	}
+	http.Error(rw, "method not allowed", http.StatusMethodNotAllowed)
+}
+
 func (w *Watchdog) apiAppRouter(rw http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodPost:
@@ -1900,6 +2233,7 @@ func main() {
 
 	wd.startAll()
 	go wd.watchReboot()
+	go wd.watchCommands()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", wd.handleIndex)
@@ -1908,6 +2242,8 @@ func main() {
 	mux.HandleFunc("/api/app", wd.apiAppRouter)
 	mux.HandleFunc("/api/app/", wd.apiAppRouter)
 	mux.HandleFunc("/api/pick", wd.handlePick)
+	mux.HandleFunc("/api/command", wd.apiCommandRouter)
+	mux.HandleFunc("/api/command/", wd.apiCommandRouter)
 	mux.HandleFunc("/api/shutdown", wd.handleShutdown)
 
 	addr := fmt.Sprintf(":%d", wd.config.WebPort)
