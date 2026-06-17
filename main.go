@@ -1259,7 +1259,11 @@ func (w *Watchdog) watchSchedule(wa *WatchedApp) {
 	log.Printf("[%s] Schedule active: %s-%s days=%v",
 		wa.Config.ID, sched.StartTime, sched.StopTime, sched.Days)
 
-	scheduledStop := false
+	// If the app is currently outside its schedule window, treat it as
+	// already "scheduled-stopped" so the next window opening triggers a
+	// start. Otherwise an app registered before its start time (started
+	// outside the window, never launched) would never start when 10:00 hits.
+	scheduledStop := !isInSchedule(sched, time.Now())
 
 	for {
 		select {
@@ -1322,9 +1326,13 @@ func (w *Watchdog) addAndStart(cfg AppConfig) error {
 	hasSchedule := cfg.Schedule != nil && cfg.Schedule.StartTime != "" && cfg.Schedule.StopTime != ""
 
 	// If outside schedule, don't start the app — just register and wait.
+	// The watcher goroutines are still launched so that once watchSchedule
+	// starts the app at its start_time, crashes are detected and recovered
+	// (the watchers idle while Status != running).
 	if hasSchedule && !isInSchedule(cfg.Schedule, time.Now()) {
 		log.Printf("[%s] Outside schedule, not starting", cfg.ID)
 		w.apps[cfg.ID] = wa
+		w.startWatchers(wa)
 		go w.watchSchedule(wa)
 		return nil
 	}
@@ -1355,8 +1363,18 @@ func (w *Watchdog) addAndStart(cfg AppConfig) error {
 
 	w.apps[cfg.ID] = wa
 
-	// Launch the appropriate watcher goroutine based on watch_method.
-	switch cfg.WatchMethod {
+	w.startWatchers(wa)
+	if hasSchedule {
+		go w.watchSchedule(wa)
+	}
+	return nil
+}
+
+// startWatchers launches the watch-method goroutine plus the timeout checker
+// for an app. Safe to call before the app is running: each watcher idles while
+// Status != running. Must be called exactly once per app.
+func (w *Watchdog) startWatchers(wa *WatchedApp) {
+	switch wa.Config.WatchMethod {
 	case WatchUDP:
 		go w.listenHeartbeatUDP(wa)
 	case WatchProcess:
@@ -1368,15 +1386,11 @@ func (w *Watchdog) addAndStart(cfg AppConfig) error {
 	case WatchWindow:
 		go w.watchWindow(wa)
 	default:
-		log.Printf("[%s] Unknown watch method %q, falling back to process", cfg.ID, cfg.WatchMethod)
+		log.Printf("[%s] Unknown watch method %q, falling back to process", wa.Config.ID, wa.Config.WatchMethod)
 		go w.watchProcess(wa)
 	}
 
 	go w.watchTimeout(wa)
-	if hasSchedule {
-		go w.watchSchedule(wa)
-	}
-	return nil
 }
 
 func (w *Watchdog) stopApp(id string) {
