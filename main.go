@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"html/template"
+	"io"
 	"log"
 	"math"
 	"net"
@@ -1966,6 +1967,114 @@ func (w *Watchdog) handleShutdown(rw http.ResponseWriter, r *http.Request) {
 	}()
 }
 
+// validateConfig performs sanity checks on a config before it is accepted
+// (used by the import endpoint).
+func validateConfig(c *Config) error {
+	seen := make(map[string]bool)
+	for i, a := range c.Apps {
+		if a.ID == "" {
+			return fmt.Errorf("apps[%d]: id is required", i)
+		}
+		if seen[a.ID] {
+			return fmt.Errorf("duplicate app id %q", a.ID)
+		}
+		seen[a.ID] = true
+		if a.ExePath == "" {
+			return fmt.Errorf("app %q: exe_path is required", a.ID)
+		}
+		if a.TimeoutSec <= 0 {
+			return fmt.Errorf("app %q: timeout_sec must be > 0", a.ID)
+		}
+		if a.Schedule != nil {
+			if a.Schedule.StartTime != "" {
+				if _, _, err := parseHHMM(a.Schedule.StartTime); err != nil {
+					return fmt.Errorf("app %q schedule: %v", a.ID, err)
+				}
+			}
+			if a.Schedule.StopTime != "" {
+				if _, _, err := parseHHMM(a.Schedule.StopTime); err != nil {
+					return fmt.Errorf("app %q schedule: %v", a.ID, err)
+				}
+			}
+		}
+	}
+	if c.RebootTime != "" {
+		if _, _, err := parseHHMM(c.RebootTime); err != nil {
+			return fmt.Errorf("reboot_time: %v", err)
+		}
+	}
+	return nil
+}
+
+// handleConfigExport streams the full current config as a downloadable JSON
+// file, for backup or cloning onto another machine.
+func (w *Watchdog) handleConfigExport(rw http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(rw, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.mu.RLock()
+	data, err := json.MarshalIndent(w.config, "", "  ")
+	w.mu.RUnlock()
+	if err != nil {
+		http.Error(rw, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	filename := "watchdog-config-" + time.Now().Format("2006-01-02") + ".json"
+	rw.Header().Set("Content-Type", "application/json")
+	rw.Header().Set("Content-Disposition", `attachment; filename="`+filename+`"`)
+	rw.Write(data)
+}
+
+// handleConfigImport replaces the entire config with an uploaded JSON document,
+// persists it, and restarts all watched apps. Changes to web_port /
+// show_console only take effect after a process restart (the HTTP server and
+// console window are already bound).
+func (w *Watchdog) handleConfigImport(rw http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(rw, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, 4<<20)) // 4 MiB cap
+	if err != nil {
+		http.Error(rw, err.Error(), http.StatusBadRequest)
+		return
+	}
+	var newCfg Config
+	if err := json.Unmarshal(body, &newCfg); err != nil {
+		http.Error(rw, "invalid config JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := validateConfig(&newCfg); err != nil {
+		http.Error(rw, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// Stop everything currently running, swap in the new config, persist,
+	// then relaunch from the new config.
+	w.stopAll()
+
+	w.mu.Lock()
+	prevPort := w.config.WebPort
+	w.config = newCfg
+	saveErr := w.saveConfig()
+	w.mu.Unlock()
+	if saveErr != nil {
+		http.Error(rw, "failed to save config: "+saveErr.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.startAll()
+
+	log.Printf("Config imported: %d app(s)", len(newCfg.Apps))
+	rw.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(rw).Encode(map[string]interface{}{
+		"status":           "imported",
+		"apps":             len(newCfg.Apps),
+		"restart_required": newCfg.WebPort != 0 && newCfg.WebPort != prevPort,
+	})
+}
+
 func (w *Watchdog) handleSettings(rw http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -2253,6 +2362,8 @@ func main() {
 	mux.HandleFunc("/", wd.handleIndex)
 	mux.HandleFunc("/api/status", wd.handleAPIStatus)
 	mux.HandleFunc("/api/settings", wd.handleSettings)
+	mux.HandleFunc("/api/config/export", wd.handleConfigExport)
+	mux.HandleFunc("/api/config/import", wd.handleConfigImport)
 	mux.HandleFunc("/api/app", wd.apiAppRouter)
 	mux.HandleFunc("/api/app/", wd.apiAppRouter)
 	mux.HandleFunc("/api/pick", wd.handlePick)

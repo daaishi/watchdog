@@ -246,7 +246,11 @@
         </div>
         <div class="form-actions">
           <button class="btn btn-primary" data-i18n="settings.save" onclick="saveSettings()">Save Settings</button>
+          <button class="btn btn-secondary" data-i18n="settings.export" onclick="exportConfig()">Export Config</button>
+          <button class="btn btn-secondary" data-i18n="settings.import" onclick="document.getElementById('import-file').click()">Import Config</button>
+          <input type="file" id="import-file" accept="application/json,.json" style="display:none" onchange="importConfig(this)">
         </div>
+        <div class="hint" data-i18n="settings.import_hint">Import replaces all settings and restarts apps. Changing web_port needs a restart.</div>
       </div>
     </details>
 
@@ -546,6 +550,9 @@
         'settings.log_dir': 'ログ出力先',
         'settings.log_dir_hint': 'exeからの相対パス、または絶対パス。',
         'settings.save': '設定を保存',
+        'settings.export': '設定をエクスポート',
+        'settings.import': '設定をインポート',
+        'settings.import_hint': 'インポートすると全設定が置き換わり、アプリが再起動します。web_port の変更は再起動後に有効。',
         'common.browse': '参照...',
         'common.loading': '読み込み中...',
         'table.app': 'アプリ',
@@ -662,6 +669,10 @@
         'msg.req_host': 'ホストを入力してください',
         'msg.dialog_failed': 'ダイアログを開けませんでした',
         'msg.del_cmd': 'コマンド「%s」を削除しますか？',
+        'msg.import_confirm': '設定をインポートすると現在の全設定が置き換わり、監視中のアプリが再起動します。続行しますか？',
+        'msg.import_bad_json': 'JSONとして読み込めませんでした: ',
+        'msg.import_ok': '設定をインポートしました（アプリ %s 件）。',
+        'msg.import_restart': 'web_port を変更したため、反映には Watchdog の再起動が必要です。',
         'ph.id': '名前から自動生成',
         'ph.cmd_payload': '送信する文字列、またはHEXバイト',
         'ph.pj_pass': '認証なしなら空欄',
@@ -677,6 +688,9 @@
         'settings.log_dir': 'Log Directory',
         'settings.log_dir_hint': 'Relative to exe or absolute path.',
         'settings.save': 'Save Settings',
+        'settings.export': 'Export Config',
+        'settings.import': 'Import Config',
+        'settings.import_hint': 'Import replaces all settings and restarts apps. Changing web_port needs a restart.',
         'common.browse': 'Browse...',
         'common.loading': 'Loading...',
         'table.app': 'App',
@@ -793,6 +807,10 @@
         'msg.req_host': 'Please enter a host',
         'msg.dialog_failed': 'Could not open the dialog',
         'msg.del_cmd': 'Delete command "%s"?',
+        'msg.import_confirm': 'Importing replaces all current settings and restarts monitored apps. Continue?',
+        'msg.import_bad_json': 'Could not parse as JSON: ',
+        'msg.import_ok': 'Config imported (%s app(s)).',
+        'msg.import_restart': 'web_port changed — restart Watchdog for it to take effect.',
         'ph.id': 'auto-generated from name',
         'ph.cmd_payload': 'text to send, or HEX bytes',
         'ph.pj_pass': 'blank if no auth',
@@ -1200,6 +1218,41 @@
           body: JSON.stringify({log_dir: logDir, reboot_time: rebootTime, reboot_days: rebootDays}),
         });
         if (!res.ok) { alert(t('msg.error_prefix') + await res.text()); return; }
+        settingsLoaded = false;
+        fetchStatus();
+      } catch (e) {
+        alert(t('msg.req_failed') + e);
+      }
+    }
+
+    function exportConfig() {
+      // Trigger a browser download of the current config from the server.
+      const a = document.createElement('a');
+      a.href = '/api/config/export';
+      a.download = '';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    }
+
+    async function importConfig(input) {
+      const file = input.files && input.files[0];
+      input.value = ''; // allow re-importing the same file later
+      if (!file) return;
+      if (!confirm(t('msg.import_confirm'))) return;
+      try {
+        const text = await file.text();
+        let parsed;
+        try { parsed = JSON.parse(text); }
+        catch (e) { alert(t('msg.import_bad_json') + e); return; }
+        const res = await fetch('/api/config/import', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify(parsed),
+        });
+        if (!res.ok) { alert(t('msg.error_prefix') + await res.text()); return; }
+        const out = await res.json();
+        alert(t('msg.import_ok', out.apps) + (out.restart_required ? '\n' + t('msg.import_restart') : ''));
         settingsLoaded = false;
         fetchStatus();
       } catch (e) {
