@@ -93,6 +93,16 @@ func (w *dateRotatingWriter) Write(p []byte) (n int, err error) {
 	return n, err
 }
 
+// CurrentPath returns the log file being written to, or "" if there is none.
+func (w *dateRotatingWriter) CurrentPath() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.current == nil {
+		return ""
+	}
+	return w.current.Name()
+}
+
 func (w *dateRotatingWriter) Close() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -107,9 +117,10 @@ func (w *dateRotatingWriter) Close() error {
 // ---------------------------------------------------------------------------
 
 var (
-	kernel32              = syscall.NewLazyDLL("kernel32.dll")
-	procGetConsoleWindow  = kernel32.NewProc("GetConsoleWindow")
+	kernel32               = syscall.NewLazyDLL("kernel32.dll")
+	procGetConsoleWindow   = kernel32.NewProc("GetConsoleWindow")
 	procGetCurrentThreadId = kernel32.NewProc("GetCurrentThreadId")
+	procGetProcessId       = kernel32.NewProc("GetProcessId")
 
 	user32                       = syscall.NewLazyDLL("user32.dll")
 	procShowWindow               = user32.NewProc("ShowWindow")
@@ -130,6 +141,10 @@ var (
 	shell32                 = syscall.NewLazyDLL("shell32.dll")
 	procSHBrowseForFolder   = shell32.NewProc("SHBrowseForFolderW")
 	procSHGetPathFromIDList = shell32.NewProc("SHGetPathFromIDListW")
+	procShellExecuteEx      = shell32.NewProc("ShellExecuteExW")
+
+	shlwapi               = syscall.NewLazyDLL("shlwapi.dll")
+	procAssocQueryStringW = shlwapi.NewProc("AssocQueryStringW")
 
 	ole32              = syscall.NewLazyDLL("ole32.dll")
 	procCoInitializeEx = ole32.NewProc("CoInitializeEx")
@@ -417,10 +432,17 @@ type WatchedApp struct {
 	StartedAt     time.Time
 
 	mu      sync.Mutex
-	cmd     *exec.Cmd
 	udpConn *net.UDPConn
 	stopCh  chan struct{}
 	stopped bool
+
+	// lastDiscover throttles process-list scans, which cost a PowerShell run.
+	lastDiscover time.Time
+	// restarts counts consecutive automatic restarts; it drives the backoff that
+	// stops a mis-detected crash from turning into a launch storm.
+	restarts           int
+	lastRestart        time.Time
+	restartDeferLogged bool
 }
 
 // ---------------------------------------------------------------------------
@@ -481,23 +503,86 @@ func (w *Watchdog) saveConfig() error {
 // Process launch helpers
 // ---------------------------------------------------------------------------
 
-func launchApp(cfg AppConfig, showConsole bool) (*exec.Cmd, error) {
+const (
+	seeMaskNoCloseProcess = 0x00000040
+	seeMaskNoAsync        = 0x00000100
+	swShowNormal          = 1
+)
+
+type shellExecuteInfo struct {
+	cbSize         uint32
+	fMask          uint32
+	hwnd           uintptr
+	lpVerb         *uint16
+	lpFile         *uint16
+	lpParameters   *uint16
+	lpDirectory    *uint16
+	nShow          int32
+	hInstApp       uintptr
+	lpIDList       uintptr
+	lpClass        *uint16
+	hkeyClass      uintptr
+	dwHotKey       uint32
+	hIconOrMonitor uintptr
+	hProcess       uintptr
+}
+
+// shellOpenDocument opens a document with its associated application — the
+// equivalent of double-clicking it — and returns the PID of the process the
+// shell created.
+//
+// It returns 0 when the shell created no process: single-instance apps like
+// MadMapper and TouchDesigner hand the document to an already-running instance
+// instead. The caller then has to discover the PID by scanning the process list.
+//
+// This replaces the older `cmd /C start` trick: ShellExecuteEx gives us a real
+// process handle, so in the normal case the PID is known exactly and
+// immediately instead of being guessed afterwards.
+func shellOpenDocument(path string, args []string) (int, error) {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+
+	procCoInitializeEx.Call(0, coinitApartment)
+	defer procCoUninitialize.Call()
+
+	filePtr, err := syscall.UTF16PtrFromString(path)
+	if err != nil {
+		return 0, err
+	}
+	dirPtr, _ := syscall.UTF16PtrFromString(filepath.Dir(path))
+	var paramPtr *uint16
+	if len(args) > 0 {
+		paramPtr, _ = syscall.UTF16PtrFromString(strings.Join(args, " "))
+	}
+
+	// lpVerb stays nil so the file type's default verb is used, exactly like a
+	// double-click. SEE_MASK_NOASYNC is required because we have no message loop.
+	info := shellExecuteInfo{
+		fMask:        seeMaskNoCloseProcess | seeMaskNoAsync,
+		lpFile:       filePtr,
+		lpParameters: paramPtr,
+		lpDirectory:  dirPtr,
+		nShow:        swShowNormal,
+	}
+	info.cbSize = uint32(unsafe.Sizeof(info))
+
+	ret, _, callErr := procShellExecuteEx.Call(uintptr(unsafe.Pointer(&info)))
+	if ret == 0 {
+		return 0, fmt.Errorf("ShellExecuteEx %q: %v", path, callErr)
+	}
+	if info.hProcess == 0 {
+		return 0, nil
+	}
+	pid, _, _ := procGetProcessId.Call(info.hProcess)
+	syscall.CloseHandle(syscall.Handle(info.hProcess))
+	return int(pid), nil
+}
+
+// launchApp starts an app and returns the PID assigned to it, or 0 when the
+// launch produced no new process (see shellOpenDocument).
+func launchApp(cfg AppConfig, showConsole bool) (int, error) {
 	if cfg.UseShellOpen {
-		args := []string{"/C", "start", "/B", ""}
-		args = append(args, cfg.ExePath)
-		args = append(args, cfg.Args...)
-		cmd := exec.Command("cmd", args...)
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-		if !showConsole {
-			cmd.SysProcAttr = &syscall.SysProcAttr{
-				CreationFlags: 0x08000000, // CREATE_NO_WINDOW
-			}
-		}
-		if err := cmd.Start(); err != nil {
-			return nil, err
-		}
-		return cmd, nil
+		return shellOpenDocument(cfg.ExePath, cfg.Args)
 	}
 
 	cmd := exec.Command(cfg.ExePath, cfg.Args...)
@@ -509,15 +594,19 @@ func launchApp(cfg AppConfig, showConsole bool) (*exec.Cmd, error) {
 		}
 	}
 	if err := cmd.Start(); err != nil {
-		return nil, err
+		return 0, err
 	}
-	return cmd, nil
+	// Reap the child once it exits so its handle isn't held forever; liveness is
+	// tracked by PID, not through this handle.
+	go cmd.Wait()
+	return cmd.Process.Pid, nil
 }
 
 // procInfo is a single running process as reported by Win32_Process.
 type procInfo struct {
 	pid     int
 	name    string
+	created time.Time
 	cmdline string
 }
 
@@ -525,8 +614,9 @@ type procInfo struct {
 // of wmic because wmic has been removed from recent Windows 11 builds.
 func enumProcesses() ([]procInfo, error) {
 	const sep = "\x1f" // unit separator — won't appear in paths/command lines
-	script := `Get-CimInstance Win32_Process | ForEach-Object { "$($_.ProcessId)` + sep +
-		`$($_.Name)` + sep + `$($_.CommandLine)" }`
+	script := `Get-CimInstance Win32_Process | ForEach-Object { ` +
+		`$t = ''; if ($_.CreationDate) { $t = $_.CreationDate.ToString('yyyyMMddHHmmss') }; ` +
+		`"$($_.ProcessId)` + sep + `$($_.Name)` + sep + `$t` + sep + `$($_.CommandLine)" }`
 	cmd := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command", script)
 	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: 0x08000000} // CREATE_NO_WINDOW
 	out, err := cmd.Output()
@@ -540,8 +630,8 @@ func enumProcesses() ([]procInfo, error) {
 		if line == "" {
 			continue
 		}
-		parts := strings.SplitN(line, sep, 3)
-		if len(parts) < 2 {
+		parts := strings.SplitN(line, sep, 4)
+		if len(parts) < 3 {
 			continue
 		}
 		pid, err := strconv.Atoi(strings.TrimSpace(parts[0]))
@@ -549,64 +639,193 @@ func enumProcesses() ([]procInfo, error) {
 			continue
 		}
 		p := procInfo{pid: pid, name: parts[1]}
-		if len(parts) == 3 {
-			p.cmdline = parts[2]
+		if t, err := time.ParseInLocation("20060102150405", strings.TrimSpace(parts[2]), time.Local); err == nil {
+			p.created = t
+		}
+		if len(parts) == 4 {
+			p.cmdline = parts[3]
 		}
 		procs = append(procs, p)
 	}
 	return procs, nil
 }
 
-// discoverPID finds the PID of an app's process.
+const (
+	assocstrExecutable      = 2
+	assocfInitIgnoreUnknown = 0x00000400
+)
+
+// associatedHostExe resolves the application registered to open a document type,
+// e.g. ".mad" -> "MadMapper.exe". Returns "" if nothing is registered.
+func associatedHostExe(docPath string) string {
+	ext := filepath.Ext(docPath)
+	if ext == "" {
+		return ""
+	}
+	extPtr, err := syscall.UTF16PtrFromString(ext)
+	if err != nil {
+		return ""
+	}
+	buf := make([]uint16, 1024)
+	n := uint32(len(buf))
+	ret, _, _ := procAssocQueryStringW.Call(
+		assocfInitIgnoreUnknown,
+		assocstrExecutable,
+		uintptr(unsafe.Pointer(extPtr)),
+		0,
+		uintptr(unsafe.Pointer(&buf[0])),
+		uintptr(unsafe.Pointer(&n)),
+	)
+	if ret != 0 { // anything but S_OK
+		return ""
+	}
+	return filepath.Base(syscall.UTF16ToString(buf))
+}
+
+// How confidently a running process was identified as a configured app.
+// Lower is better.
+const (
+	// The configured path appears in the command line: identified beyond doubt.
+	matchDocPath = 0
+	// Only the document's file name appears — same document, moved or copied.
+	matchDocName = 1
+	// The application registered for this document type is running, but was
+	// started from some other document. Single-instance apps like MadMapper and
+	// TouchDesigner keep the command line of whatever document opened them
+	// first, so this is the only way to recognise an instance that adopted our
+	// document afterwards — which is what happens every time the shell hands a
+	// document to a running instance.
+	matchHostExe = 2
+)
+
+// appMatch is a live process that looks like a configured app.
+type appMatch struct {
+	proc      procInfo
+	rank      int
+	hasWindow bool
+}
+
+// matchApp reports whether p looks like cfg's process.
 //
 //   - For a shell-open document (e.g. a .mad / .toe file launched by file
 //     association) the real process is the host app (MadMapper.exe, launched
 //     with the document path on its command line), so we match by that path —
-//     NOT by the document's own file name.
+//     NOT by the document's own image name.
 //   - For a directly-launched exe we match by image name, plus the first arg
 //     if present to disambiguate multiple instances.
-func discoverPID(cfg AppConfig) int {
+func matchApp(cfg AppConfig, hostExe string, p procInfo) (rank int, ok bool) {
+	cl := strings.ToLower(p.cmdline)
+	if cfg.UseShellOpen {
+		if full := strings.ToLower(cfg.ExePath); full != "" && strings.Contains(cl, full) {
+			return matchDocPath, true
+		}
+		if base := strings.ToLower(filepath.Base(cfg.ExePath)); base != "" && strings.Contains(cl, base) {
+			return matchDocName, true
+		}
+		if hostExe != "" && strings.EqualFold(p.name, hostExe) {
+			return matchHostExe, true
+		}
+		return 0, false
+	}
+	if !strings.EqualFold(p.name, filepath.Base(cfg.ExePath)) {
+		return 0, false
+	}
+	if len(cfg.Args) > 0 && !strings.Contains(cl, strings.ToLower(cfg.Args[0])) {
+		return 0, false
+	}
+	return matchDocPath, true
+}
+
+// findAppInstances returns every live process that looks like cfg's app, the
+// most plausible one first.
+//
+// The ranking is what keeps document-based apps stable. MadMapper and
+// TouchDesigner are single-instance: opening a document while the app is already
+// running does not give us a process of our own — the shell hands the document
+// to the running instance, whose command line still names whatever document
+// opened it first. Identifying the app only by the configured document path
+// therefore fails exactly when the app is healthy, which used to be read as a
+// crash and "fixed" by re-opening the document every timeout, forever.
+//
+// So a process is matched on three levels (see the match* constants), and among
+// equally-ranked candidates we prefer the one owning a visible window and then
+// the older one — the instance that actually survives a hand-off.
+func findAppInstances(cfg AppConfig) []appMatch {
 	procs, err := enumProcesses()
 	if err != nil {
 		log.Printf("[%s] process enumeration failed: %v", cfg.ID, err)
-		return 0
+		return nil
 	}
 	self := os.Getpid()
 
+	// A script document is hosted by cmd.exe itself, so only exclude the shell
+	// for documents opened by a real application.
+	ext := strings.ToLower(filepath.Ext(cfg.ExePath))
+	skipShell := ext != ".bat" && ext != ".cmd"
+
+	var hostExe string
 	if cfg.UseShellOpen {
-		markers := []string{
-			strings.ToLower(cfg.ExePath),
-			strings.ToLower(filepath.Base(cfg.ExePath)),
-		}
-		for _, p := range procs {
-			if p.pid == self || strings.EqualFold(p.name, "cmd.exe") {
-				continue
-			}
-			cl := strings.ToLower(p.cmdline)
-			for _, m := range markers {
-				if m != "" && strings.Contains(cl, m) {
-					return p.pid
-				}
-			}
-		}
-		return 0
+		hostExe = associatedHostExe(cfg.ExePath)
 	}
 
-	exeName := strings.ToLower(filepath.Base(cfg.ExePath))
-	var marker string
-	if len(cfg.Args) > 0 {
-		marker = strings.ToLower(cfg.Args[0])
-	}
+	var out []appMatch
 	for _, p := range procs {
-		if p.pid == self || !strings.EqualFold(p.name, exeName) {
+		if p.pid == self || strings.EqualFold(p.name, "conhost.exe") {
 			continue
 		}
-		if marker != "" && !strings.Contains(strings.ToLower(p.cmdline), marker) {
+		if skipShell && strings.EqualFold(p.name, "cmd.exe") {
 			continue
 		}
-		return p.pid
+		rank, ok := matchApp(cfg, hostExe, p)
+		if !ok || !isProcessAlive(p.pid) {
+			continue
+		}
+		out = append(out, appMatch{
+			proc:      p,
+			rank:      rank,
+			hasWindow: findMainWindowByPID(p.pid) != 0,
+		})
 	}
-	return 0
+
+	sort.SliceStable(out, func(i, j int) bool {
+		a, b := out[i], out[j]
+		if a.rank != b.rank {
+			return a.rank < b.rank
+		}
+		if a.hasWindow != b.hasWindow {
+			return a.hasWindow
+		}
+		if !a.proc.created.Equal(b.proc.created) {
+			return a.proc.created.Before(b.proc.created)
+		}
+		return a.proc.pid < b.proc.pid
+	})
+	return out
+}
+
+// discoverPID finds the PID of an app's process, or 0 if no live instance
+// matches.
+func discoverPID(cfg AppConfig) int {
+	inst := findAppInstances(cfg)
+	if len(inst) == 0 {
+		return 0
+	}
+	return inst[0].proc.pid
+}
+
+// killAppInstances terminates every live instance of a shell-open app except
+// exceptPID, so a restart can't leave duplicates behind. Only processes carrying
+// the configured document path are touched, which makes this precise — unlike
+// image-name matching, it can never hit an unrelated copy of the host app.
+func killAppInstances(cfg AppConfig, exceptPID int) {
+	for _, m := range findAppInstances(cfg) {
+		if m.rank != matchDocPath || m.proc.pid == exceptPID {
+			continue
+		}
+		if err := killPID(m.proc.pid); err == nil {
+			log.Printf("[%s] Killed leftover instance PID %d", cfg.ID, m.proc.pid)
+		}
+	}
 }
 
 func killPID(pid int) error {
@@ -846,47 +1065,93 @@ func (w *Watchdog) startApp(wa *WatchedApp) error {
 	wa.mu.Lock()
 	defer wa.mu.Unlock()
 
-	wa.Status = StatusStarting
-	log.Printf("[%s] Starting %s ...", wa.Config.ID, wa.Config.Name)
+	cfg := wa.Config
 
-	cmd, err := launchApp(wa.Config, w.config.ShowConsole)
-	if err != nil {
-		wa.Status = StatusStopped
-		return fmt.Errorf("launch %s: %w", wa.Config.ID, err)
-	}
-	wa.cmd = cmd
-
-	if wa.Config.UseShellOpen {
-		go func() {
-			time.Sleep(5 * time.Second)
-			for i := 0; i < 6; i++ {
-				pid := discoverPID(wa.Config)
-				if pid > 0 {
-					wa.mu.Lock()
-					wa.PID = pid
-					wa.Status = StatusRunning
-					wa.StartedAt = time.Now()
-					wa.LastHeartbeat = time.Now()
-					wa.mu.Unlock()
-					log.Printf("[%s] Discovered PID %d", wa.Config.ID, pid)
-					return
+	// Single-instance document apps (MadMapper .mad, TouchDesigner .toe) give us
+	// no process of our own when the document is opened again — the shell hands
+	// it to the running instance. Attach to that instance instead of launching on
+	// top of it, so a restart can never stack up windows.
+	if cfg.UseShellOpen {
+		if inst := findAppInstances(cfg); len(inst) > 0 {
+			best := inst[0]
+			if best.rank == matchHostExe {
+				// The app is up but was started from a different document, so ask
+				// it to open ours before attaching — otherwise we would watch an
+				// instance showing the wrong project.
+				if _, err := launchApp(cfg, w.config.ShowConsole); err != nil {
+					log.Printf("[%s] could not send open request: %v", cfg.ID, err)
+				} else {
+					log.Printf("[%s] %s already running with another document; opened %s in it",
+						cfg.ID, best.proc.name, filepath.Base(cfg.ExePath))
 				}
-				time.Sleep(3 * time.Second)
+			} else {
+				log.Printf("[%s] Already running; attached to PID %d", cfg.ID, best.proc.pid)
 			}
-			log.Printf("[%s] WARNING: could not discover PID via WMIC", wa.Config.ID)
-			wa.mu.Lock()
+			wa.PID = best.proc.pid
 			wa.Status = StatusRunning
 			wa.StartedAt = time.Now()
 			wa.LastHeartbeat = time.Now()
-			wa.mu.Unlock()
-		}()
-	} else {
-		wa.PID = cmd.Process.Pid
+			return nil
+		}
+	}
+
+	wa.Status = StatusStarting
+	log.Printf("[%s] Starting %s ...", cfg.ID, cfg.Name)
+
+	pid, err := launchApp(cfg, w.config.ShowConsole)
+	if err != nil {
+		wa.Status = StatusStopped
+		return fmt.Errorf("launch %s: %w", cfg.ID, err)
+	}
+
+	if pid > 0 {
+		wa.PID = pid
 		wa.Status = StatusRunning
 		wa.StartedAt = time.Now()
 		wa.LastHeartbeat = time.Now()
-		log.Printf("[%s] Started with PID %d", wa.Config.ID, wa.PID)
+		log.Printf("[%s] Started with PID %d", cfg.ID, pid)
+		return nil
 	}
+
+	// The shell reported no new process, so the document went to an instance that
+	// was already coming up. Find it in the background; Status stays "starting"
+	// meanwhile, which keeps the timeout checker from firing.
+	log.Printf("[%s] Launched; discovering PID ...", cfg.ID)
+	go func() {
+		for i := 0; i < 20; i++ {
+			select {
+			case <-wa.stopCh:
+				return
+			case <-time.After(3 * time.Second):
+			}
+			pid := discoverPID(cfg)
+			wa.mu.Lock()
+			if wa.stopped {
+				wa.mu.Unlock()
+				return
+			}
+			if pid > 0 {
+				wa.PID = pid
+				wa.Status = StatusRunning
+				wa.StartedAt = time.Now()
+				wa.LastHeartbeat = time.Now()
+				wa.mu.Unlock()
+				log.Printf("[%s] Discovered PID %d", cfg.ID, pid)
+				return
+			}
+			wa.mu.Unlock()
+		}
+		// Give up on discovery but keep watching: the process watcher retries,
+		// and the timeout checker restarts the app if nothing ever shows up.
+		log.Printf("[%s] WARNING: could not discover PID; will keep looking", cfg.ID)
+		wa.mu.Lock()
+		if !wa.stopped {
+			wa.Status = StatusRunning
+			wa.StartedAt = time.Now()
+			wa.LastHeartbeat = time.Now()
+		}
+		wa.mu.Unlock()
+	}()
 
 	return nil
 }
@@ -896,6 +1161,10 @@ func (w *Watchdog) killAndRestart(wa *WatchedApp) {
 	pid := wa.PID
 	autoStart := wa.Config.AutoStart
 	wa.Status = StatusStopped
+	wa.PID = 0
+	wa.restarts++
+	wa.lastRestart = time.Now()
+	wa.restartDeferLogged = false
 	wa.mu.Unlock()
 
 	if pid > 0 {
@@ -903,6 +1172,11 @@ func (w *Watchdog) killAndRestart(wa *WatchedApp) {
 		if err := killPID(pid); err != nil {
 			log.Printf("[%s] taskkill: %v (process may have already exited)", wa.Config.ID, err)
 		}
+	}
+	// Take any other instance of the same document with it, so the restart starts
+	// from a clean slate instead of adding to what is already open.
+	if wa.Config.UseShellOpen {
+		killAppInstances(wa.Config, 0)
 	}
 
 	time.Sleep(2 * time.Second)
@@ -976,21 +1250,51 @@ func (w *Watchdog) listenHeartbeatUDP(wa *WatchedApp) {
 // Watch method: Process existence check
 // ---------------------------------------------------------------------------
 
+// rediscoverInterval throttles how often a lost PID is looked up again; each
+// scan costs a PowerShell / CIM run.
+const rediscoverInterval = 15 * time.Second
+
 func (w *Watchdog) checkProcessOnce(wa *WatchedApp) {
 	wa.mu.Lock()
 	pid := wa.PID
 	status := wa.Status
+	cfg := wa.Config
+	lastDiscover := wa.lastDiscover
 	wa.mu.Unlock()
 
-	if status != StatusRunning || pid == 0 {
+	if status != StatusRunning {
 		return
 	}
 
-	if isProcessAlive(pid) {
+	if pid > 0 && isProcessAlive(pid) {
 		wa.mu.Lock()
 		wa.LastHeartbeat = time.Now()
 		wa.mu.Unlock()
+		return
 	}
+
+	// The tracked PID is gone, or was never found. That is not proof the app died:
+	// a document-based app may have handed its document to another instance and
+	// exited, and a watch-only app may have been restarted outside our control.
+	// Look for a live instance before letting the timeout checker restart it.
+	if time.Since(lastDiscover) < rediscoverInterval {
+		return
+	}
+	wa.mu.Lock()
+	wa.lastDiscover = time.Now()
+	wa.mu.Unlock()
+
+	newPID := discoverPID(cfg)
+	if newPID <= 0 {
+		return // really gone: the timeout checker takes over
+	}
+	wa.mu.Lock()
+	if wa.Status == StatusRunning {
+		wa.PID = newPID
+		wa.LastHeartbeat = time.Now()
+	}
+	wa.mu.Unlock()
+	log.Printf("[%s] Re-attached to live instance PID %d (was %d)", cfg.ID, newPID, pid)
 }
 
 func (w *Watchdog) watchProcess(wa *WatchedApp) {
@@ -1216,6 +1520,25 @@ func isInSchedule(sched *ScheduleConfig, now time.Time) bool {
 // Timeout checker (shared for all watch methods)
 // ---------------------------------------------------------------------------
 
+// restartHealthyReset is how long an app must stay responsive before earlier
+// restarts are forgotten and the backoff starts over.
+const restartHealthyReset = 10 * time.Minute
+
+// restartBackoff spaces out repeated automatic restarts. The first one is
+// immediate — a real crash should be recovered at once — but a restart that does
+// not fix anything backs off, up to 5 minutes, so a mis-detected crash can never
+// become a launch storm.
+func restartBackoff(consecutive int) time.Duration {
+	if consecutive <= 0 {
+		return 0
+	}
+	d := 30 * time.Second << uint(min(consecutive-1, 4))
+	if d > 5*time.Minute {
+		d = 5 * time.Minute
+	}
+	return d
+}
+
 func (w *Watchdog) watchTimeout(wa *WatchedApp) {
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
@@ -1231,15 +1554,41 @@ func (w *Watchdog) watchTimeout(wa *WatchedApp) {
 			timeout := wa.Config.TimeoutSec
 			wa.mu.Unlock()
 
-			if status != StatusRunning {
+			if status != StatusRunning || timeout <= 0 {
 				continue
 			}
 
-			if time.Since(last) > time.Duration(timeout)*time.Second {
-				log.Printf("[%s] Heartbeat timeout (%ds). Restarting ...",
-					wa.Config.ID, timeout)
-				w.killAndRestart(wa)
+			if time.Since(last) <= time.Duration(timeout)*time.Second {
+				// Responsive: once it has held up for a while, forget past restarts.
+				wa.mu.Lock()
+				if wa.restarts > 0 && time.Since(wa.lastRestart) > restartHealthyReset {
+					wa.restarts = 0
+				}
+				wa.mu.Unlock()
+				continue
 			}
+
+			wa.mu.Lock()
+			restarts := wa.restarts
+			backoff := restartBackoff(restarts)
+			deferred := restarts > 0 && time.Since(wa.lastRestart) < backoff
+			logDeferred := deferred && !wa.restartDeferLogged
+			if logDeferred {
+				wa.restartDeferLogged = true
+			}
+			wa.mu.Unlock()
+
+			if deferred {
+				if logDeferred {
+					log.Printf("[%s] Heartbeat timeout (%ds), but %d restart(s) did not help; waiting %s before retrying",
+						wa.Config.ID, timeout, restarts, backoff)
+				}
+				continue
+			}
+
+			log.Printf("[%s] Heartbeat timeout (%ds). Restarting ...",
+				wa.Config.ID, timeout)
+			w.killAndRestart(wa)
 		}
 	}
 }
@@ -1670,6 +2019,9 @@ type AppStatusView struct {
 	Status        string
 	LastHeartbeat string
 	StartedAt     string
+	// Restarts is the number of consecutive automatic restarts; a climbing
+	// number is the signal that recovery is not working.
+	Restarts int
 }
 
 // watchMethodLabel returns a human-readable description of the watch method.
@@ -1744,6 +2096,7 @@ func (w *Watchdog) getStatusViews() []AppStatusView {
 			wa.mu.Lock()
 			v.PID = wa.PID
 			v.Status = string(wa.Status)
+			v.Restarts = wa.restarts
 			if !wa.LastHeartbeat.IsZero() {
 				v.LastHeartbeat = wa.LastHeartbeat.Format("2006-01-02 15:04:05")
 			}
@@ -1965,6 +2318,84 @@ func (w *Watchdog) handleShutdown(rw http.ResponseWriter, r *http.Request) {
 		time.Sleep(500 * time.Millisecond)
 		close(w.shutdownCh)
 	}()
+}
+
+// tailLines reads at most the last n lines of a file, looking at no more than
+// the final 256 KiB so a log that grew large stays cheap to display.
+func tailLines(path string, n int) ([]string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	const maxTail = 256 << 10
+	info, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	var offset int64
+	if info.Size() > maxTail {
+		offset = info.Size() - maxTail
+	}
+	if _, err := f.Seek(offset, io.SeekStart); err != nil {
+		return nil, err
+	}
+	data, err := io.ReadAll(f)
+	if err != nil {
+		return nil, err
+	}
+
+	text := strings.ReplaceAll(string(data), "\r\n", "\n")
+	if offset > 0 {
+		if i := strings.IndexByte(text, '\n'); i >= 0 {
+			text = text[i+1:] // drop the partial first line
+		}
+	}
+	text = strings.Trim(text, "\n")
+	if text == "" {
+		return []string{}, nil
+	}
+	lines := strings.Split(text, "\n")
+	if len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+	return lines, nil
+}
+
+// handleLogs returns the tail of today's log file, so the Web UI can show what
+// the watchdog is actually doing without anyone opening a file on the machine.
+func (w *Watchdog) handleLogs(rw http.ResponseWriter, r *http.Request) {
+	n := 120
+	if v := r.URL.Query().Get("lines"); v != "" {
+		if parsed, err := strconv.Atoi(v); err == nil && parsed > 0 {
+			n = parsed
+		}
+	}
+	if n > 1000 {
+		n = 1000
+	}
+
+	var path string
+	if w.logWriter != nil {
+		path = w.logWriter.CurrentPath()
+	}
+
+	out := map[string]interface{}{"file": "", "lines": []string{}}
+	rw.Header().Set("Content-Type", "application/json")
+	if path == "" {
+		json.NewEncoder(rw).Encode(out)
+		return
+	}
+	out["file"] = filepath.Base(path)
+
+	lines, err := tailLines(path, n)
+	if err != nil {
+		out["error"] = err.Error()
+	} else {
+		out["lines"] = lines
+	}
+	json.NewEncoder(rw).Encode(out)
 }
 
 // validateConfig performs sanity checks on a config before it is accepted
@@ -2361,6 +2792,7 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", wd.handleIndex)
 	mux.HandleFunc("/api/status", wd.handleAPIStatus)
+	mux.HandleFunc("/api/logs", wd.handleLogs)
 	mux.HandleFunc("/api/settings", wd.handleSettings)
 	mux.HandleFunc("/api/config/export", wd.handleConfigExport)
 	mux.HandleFunc("/api/config/import", wd.handleConfigImport)

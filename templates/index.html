@@ -3,1045 +3,1084 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="color-scheme" content="dark">
   <title>Watchdog - Process Monitor</title>
   <style>
+    :root {
+      --bg: #0f1923;
+      --panel: #162029;
+      --panel-2: #1a2733;
+      --line: #24343f;
+      --text: #e2e8ee;
+      --dim: #8299ab;
+      --dimmer: #5f7789;
+      --accent: #2d9cdb;
+      --ok: #34d399;
+      --warn: #fbbf24;
+      --bad: #f87171;
+    }
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body {
       font-family: "Segoe UI", "Meiryo", sans-serif;
-      background: #0f1923;
-      color: #e0e0e0;
-      min-height: 100vh;
+      background: var(--bg); color: var(--text); min-height: 100vh; font-size: 14px;
     }
+    code, .mono { font-family: Consolas, "Courier New", monospace; }
+
+    /* ---------- header ---------- */
     header {
-      background: #1a2733;
-      border-bottom: 2px solid #2d9cdb;
-      padding: 16px 32px;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
+      position: sticky; top: 0; z-index: 20;
+      background: var(--panel-2); border-bottom: 1px solid var(--line);
+      padding: 12px 24px; display: flex; align-items: center; gap: 20px; flex-wrap: wrap;
     }
-    header h1 { font-size: 22px; font-weight: 600; color: #2d9cdb; }
-    header .clock { font-size: 14px; color: #8899aa; font-variant-numeric: tabular-nums; }
-    .container { max-width: 1200px; margin: 0 auto; padding: 24px 16px; }
+    header h1 { font-size: 18px; font-weight: 600; color: var(--accent); white-space: nowrap; }
+    .summary { display: flex; gap: 14px; flex-wrap: wrap; }
+    .sum {
+      display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--dim);
+      background: #12202b; border: 1px solid var(--line); border-radius: 999px; padding: 4px 12px;
+    }
+    .sum b { color: var(--text); font-variant-numeric: tabular-nums; }
+    .sum .dot { width: 8px; height: 8px; border-radius: 50%; }
+    .dot-running { background: var(--ok); }
+    .dot-bad { background: var(--bad); }
+    .dot-waiting { background: var(--dimmer); }
+    .dot-disabled { background: #4a4a4a; }
+    .header-right { margin-left: auto; display: flex; align-items: center; gap: 12px; }
+    .clock { font-size: 13px; color: var(--dim); font-variant-numeric: tabular-nums; white-space: nowrap; }
+    #header-reboot { color: var(--warn); font-size: 12px; }
 
-    table {
-      width: 100%;
-      border-collapse: collapse;
-      margin-bottom: 24px;
-      background: #162029;
-      border-radius: 8px;
-      overflow: hidden;
+    /* ---------- layout ---------- */
+    .container { max-width: 1080px; margin: 0 auto; padding: 24px 16px 64px; }
+    .section-head {
+      display: flex; align-items: center; gap: 12px; margin: 0 0 12px;
     }
-    th {
-      background: #1a2f3f;
-      text-align: left;
-      padding: 12px 14px;
-      font-size: 12px;
-      text-transform: uppercase;
-      letter-spacing: 0.5px;
-      color: #6b8da6;
-      border-bottom: 1px solid #253545;
-    }
-    td {
-      padding: 10px 14px;
-      font-size: 14px;
-      border-bottom: 1px solid #1e3040;
-      vertical-align: middle;
-    }
-    tr:last-child td { border-bottom: none; }
-    tr:hover td { background: #1a2f3f; }
+    .section-head h2 { font-size: 15px; color: var(--dim); font-weight: 600; }
+    .section-head .spacer { margin-left: auto; }
 
-    .badge {
-      display: inline-block;
-      padding: 3px 10px;
-      border-radius: 12px;
-      font-size: 12px;
-      font-weight: 600;
-      text-transform: uppercase;
-    }
-    .badge-running  { background: #0d3b26; color: #34d399; }
-    .badge-stopped  { background: #3b1c1c; color: #f87171; }
-    .badge-starting { background: #3b3010; color: #fbbf24; }
-    .badge-disabled { background: #2a2a2a; color: #666; }
-
-    .method-badge {
-      display: inline-block;
-      padding: 2px 8px;
-      border-radius: 4px;
-      font-size: 11px;
-      font-weight: 600;
-      text-transform: uppercase;
-      letter-spacing: 0.5px;
-    }
-    .method-udp     { background: #1a3a4a; color: #5bb8f0; }
-    .method-process { background: #2a2a3a; color: #a78bfa; }
-    .method-file    { background: #2a3a2a; color: #6ee7b7; }
-    .method-http    { background: #3a2a1a; color: #fbbf24; }
-    .method-window  { background: #3a1a2a; color: #f472b6; }
-
-    .watch-detail { font-size: 11px; color: #6b8da6; display: block; margin-top: 2px; }
-    .pid { font-family: "Consolas", monospace; color: #7ec8e3; }
-
-    .actions button {
-      background: none;
-      border: 1px solid #3a5060;
-      color: #8899aa;
-      padding: 4px 10px;
-      border-radius: 4px;
-      cursor: pointer;
-      font-size: 12px;
-      margin-right: 4px;
-      transition: all 0.15s;
-    }
-    .actions button:hover { border-color: #2d9cdb; color: #2d9cdb; }
-    .actions .btn-delete:hover { border-color: #f87171; color: #f87171; }
-    .actions .btn-toggle-off:hover { border-color: #34d399; color: #34d399; }
-    .actions .btn-toggle-on { border-color: #fbbf24; color: #fbbf24; }
-    .actions .btn-toggle-on:hover { border-color: #f59e0b; color: #f59e0b; }
-    tr.row-disabled td { opacity: 0.45; }
-    tr.row-disabled td.actions { opacity: 1; }
-
-    .form-section {
-      background: #162029;
-      border-radius: 8px;
-      padding: 20px 24px;
-      margin-bottom: 24px;
-    }
-    .form-section h2 { font-size: 16px; margin-bottom: 16px; color: #2d9cdb; }
-    .form-grid {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 12px;
-    }
-    .form-grid .full { grid-column: 1 / -1; }
-    label { display: block; font-size: 12px; color: #6b8da6; margin-bottom: 4px; }
-    input[type="text"], input[type="number"], select {
-      width: 100%;
-      padding: 8px 10px;
-      background: #0f1923;
-      border: 1px solid #2a3e50;
-      border-radius: 4px;
-      color: #e0e0e0;
-      font-size: 14px;
-      outline: none;
-      transition: border 0.15s;
-    }
-    select option { background: #0f1923; color: #e0e0e0; }
-    input:focus, select:focus { border-color: #2d9cdb; }
-    .checkbox-row {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      padding-top: 20px;
-    }
-    .checkbox-row input[type="checkbox"] { accent-color: #2d9cdb; width: 16px; height: 16px; }
-    .form-actions { margin-top: 16px; display: flex; gap: 8px; }
+    /* ---------- buttons ---------- */
+    button { font-family: inherit; }
     .btn {
-      padding: 8px 20px;
-      border: none;
-      border-radius: 4px;
-      font-size: 14px;
-      cursor: pointer;
-      font-weight: 600;
-      transition: opacity 0.15s;
+      display: inline-flex; align-items: center; justify-content: center; gap: 7px;
+      padding: 9px 16px; border: 1px solid transparent; border-radius: 6px;
+      font-size: 13px; font-weight: 600; cursor: pointer; white-space: nowrap;
+      transition: filter .15s, border-color .15s, color .15s;
     }
-    .btn:hover { opacity: 0.85; }
-    .btn-primary { background: #2d9cdb; color: #fff; }
-    .btn-secondary { background: #2a3e50; color: #e0e0e0; }
-    .btn-danger { background: #dc2626; color: #fff; }
-    .empty-msg { text-align: center; padding: 32px; color: #5a7080; }
+    .btn:hover:not(:disabled) { filter: brightness(1.15); }
+    .btn:disabled { opacity: .55; cursor: default; }
+    .btn-primary { background: var(--accent); color: #fff; }
+    .btn-stop { background: #2a3e50; color: #ffd9d9; border-color: #55414a; }
+    .btn-start { background: #14402c; color: #7ee2b0; border-color: #245c41; }
+    .btn-ghost { background: transparent; color: var(--dim); border-color: #33475a; }
+    .btn-ghost:hover:not(:disabled) { color: var(--accent); border-color: var(--accent); }
+    .btn-danger-ghost { background: transparent; color: #b98b8b; border-color: #55414a; }
+    .btn-danger-ghost:hover:not(:disabled) { color: var(--bad); border-color: var(--bad); }
+    .btn-sm { padding: 6px 12px; font-size: 12px; font-weight: 500; }
+    .spinner {
+      width: 12px; height: 12px; border: 2px solid rgba(255,255,255,.3);
+      border-top-color: currentColor; border-radius: 50%; animation: spin .7s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
 
-    .watch-fields { margin-top: 4px; }
-    .watch-fields .field-row { display: none; }
-    .watch-fields .field-row.active { display: block; }
-    .hint { font-size: 11px; color: #4a6a7a; margin-top: 2px; }
-    .day-checks { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 4px; }
-    .day-checks label { display: flex; align-items: center; gap: 4px; cursor: pointer; font-size: 13px; color: #8899aa; }
-    .day-checks input[type="checkbox"] { accent-color: #2d9cdb; width: 14px; height: 14px; }
+    /* ---------- app cards ---------- */
+    .cards { display: grid; gap: 14px; }
+    .card {
+      background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+      padding: 16px 18px; border-left: 4px solid var(--dimmer);
+    }
+    .card.state-running { border-left-color: var(--ok); }
+    .card.state-starting { border-left-color: var(--warn); }
+    .card.state-stopped { border-left-color: var(--bad); }
+    .card.state-waiting { border-left-color: var(--dimmer); }
+    .card.state-disabled { border-left-color: #3a3a3a; }
+    .card.state-disabled .card-main { opacity: .55; }
+    .card-top { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+    .card-name { font-size: 17px; font-weight: 600; }
+    .card-id { font-size: 11px; color: var(--dimmer); }
+    .pill {
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 4px 12px; border-radius: 999px; font-size: 12px; font-weight: 600;
+    }
+    .pill-running { background: #0d3b26; color: var(--ok); }
+    .pill-starting { background: #3b3010; color: var(--warn); }
+    .pill-stopped { background: #3b1c1c; color: var(--bad); }
+    .pill-waiting { background: #1f2c36; color: #9fb4c4; }
+    .pill-disabled { background: #262626; color: #8a8a8a; }
+    .card-target { font-size: 12px; color: var(--dim); margin-top: 6px; word-break: break-all; }
+    .facts {
+      display: flex; flex-wrap: wrap; gap: 8px 28px; margin-top: 14px;
+      padding-top: 14px; border-top: 1px solid var(--line);
+    }
+    .fact { min-width: 96px; }
+    .fact .k { display: block; font-size: 11px; color: var(--dimmer); margin-bottom: 3px; }
+    .fact .v { font-size: 13px; }
+    .fact .v.mono { color: #9fd7ef; }
+    .notice {
+      margin-top: 12px; padding: 9px 12px; border-radius: 6px; font-size: 12px;
+      background: #3b3010; color: #f5d18a; border: 1px solid #5c4a1a;
+    }
+    .card-actions { display: flex; gap: 8px; margin-top: 14px; flex-wrap: wrap; }
+    .card-actions .spacer { margin-left: auto; }
+    .hint-inline { font-size: 11px; color: var(--dimmer); align-self: center; }
 
-    /* Collapsible section (whole block, e.g. Global Settings) */
-    details.collapse { background: #162029; border-radius: 8px; margin-bottom: 24px; }
-    details.collapse > summary {
-      cursor: pointer; list-style: none; padding: 16px 24px;
-      font-size: 16px; color: #2d9cdb; font-weight: 600;
-      display: flex; align-items: center; gap: 8px;
+    .empty {
+      background: var(--panel); border: 1px dashed var(--line); border-radius: 10px;
+      padding: 36px; text-align: center; color: var(--dim);
     }
-    details.collapse > summary::-webkit-details-marker { display: none; }
-    details.collapse > summary::before {
-      content: '\25B8'; font-size: 12px; color: #6b8da6; transition: transform 0.15s;
-    }
-    details.collapse[open] > summary::before { transform: rotate(90deg); }
-    details.collapse .collapse-body { padding: 0 24px 20px; }
+    .empty p { margin-bottom: 14px; }
 
-    /* Advanced fold inside a form */
-    details.advanced { margin-top: 8px; border-top: 1px solid #253545; }
-    details.advanced > summary {
-      cursor: pointer; list-style: none; padding: 12px 0 4px;
-      color: #2d9cdb; font-size: 14px; font-weight: 600;
-      display: flex; align-items: center; gap: 8px;
+    /* ---------- collapsible panels ---------- */
+    details.panel {
+      background: var(--panel); border: 1px solid var(--line);
+      border-radius: 10px; margin-top: 22px;
     }
-    details.advanced > summary::-webkit-details-marker { display: none; }
-    details.advanced > summary::before {
-      content: '\25B8'; font-size: 11px; color: #6b8da6; transition: transform 0.15s;
+    details.panel > summary {
+      cursor: pointer; list-style: none; padding: 14px 18px;
+      font-size: 14px; font-weight: 600; color: var(--dim);
+      display: flex; align-items: center; gap: 9px;
     }
-    details.advanced[open] > summary::before { transform: rotate(90deg); }
-    details.advanced .form-grid { margin-top: 12px; }
-    .cell-sub { font-size: 11px; color: #6b8da6; display: block; margin-top: 2px; }
+    details.panel > summary::-webkit-details-marker { display: none; }
+    details.panel > summary::before {
+      content: '\25B8'; font-size: 11px; color: var(--dimmer); transition: transform .15s;
+    }
+    details.panel[open] > summary::before { transform: rotate(90deg); }
+    details.panel > summary .sub { margin-left: auto; font-size: 11px; color: var(--dimmer); font-weight: 400; }
+    .panel-body { padding: 0 18px 18px; }
 
-    /* Input + native Browse button */
-    .input-with-btn { display: flex; gap: 8px; }
-    .input-with-btn input { flex: 1; }
-    .btn-browse {
-      white-space: nowrap; padding: 8px 14px;
-      background: #2a3e50; color: #e0e0e0;
-      border: none; border-radius: 4px; cursor: pointer; font-size: 13px;
+    /* ---------- log ---------- */
+    .log-box {
+      background: #0c141b; border: 1px solid var(--line); border-radius: 6px;
+      padding: 10px 12px; height: 240px; overflow-y: auto;
+      font-family: Consolas, monospace; font-size: 12px; line-height: 1.7;
     }
-    .btn-browse:hover { opacity: 0.85; }
-    #lang-toggle { padding: 6px 12px; font-size: 13px; }
+    .log-line { white-space: pre-wrap; word-break: break-all; color: #9fb4c4; }
+    .log-line .ts { color: #5f7789; }
+    .log-line.warn { color: var(--warn); }
+    .log-line.bad { color: var(--bad); }
+    .log-toolbar { display: flex; align-items: center; gap: 14px; margin-bottom: 10px; font-size: 12px; color: var(--dim); }
+    .log-toolbar label { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+
+    /* ---------- tables (commands) ---------- */
+    table { width: 100%; border-collapse: collapse; }
+    th {
+      text-align: left; padding: 8px 10px; font-size: 11px; color: var(--dimmer);
+      text-transform: uppercase; letter-spacing: .5px; border-bottom: 1px solid var(--line);
+    }
+    td { padding: 10px; font-size: 13px; border-bottom: 1px solid #1b2832; vertical-align: middle; }
+    tr:last-child td { border-bottom: none; }
+    tr.off td:not(.acts) { opacity: .45; }
+    .tag {
+      display: inline-block; padding: 2px 8px; border-radius: 4px;
+      font-size: 11px; font-weight: 600; letter-spacing: .5px;
+    }
+    .tag-udp { background: #1a3a4a; color: #5bb8f0; }
+    .tag-osc { background: #3a2a1a; color: var(--warn); }
+    .tag-pjlink { background: #3a1a2a; color: #f472b6; }
+    .tag-process { background: #2a2a3a; color: #a78bfa; }
+    .tag-window { background: #3a1a2a; color: #f472b6; }
+    .tag-file { background: #2a3a2a; color: #6ee7b7; }
+    .tag-http { background: #3a2a1a; color: var(--warn); }
+    .acts { text-align: right; white-space: nowrap; }
+    .acts .btn { margin-left: 6px; }
+    .sub { display: block; font-size: 11px; color: var(--dimmer); margin-top: 2px; }
+
+    /* ---------- forms ---------- */
+    .field { margin-bottom: 14px; }
+    .field > label, .field-label {
+      display: block; font-size: 12px; color: var(--dim); margin-bottom: 5px; font-weight: 600;
+    }
+    input[type="text"], input[type="number"], input[type="time"], select, textarea {
+      width: 100%; padding: 9px 11px; background: #0d1620; border: 1px solid #2b3f50;
+      border-radius: 6px; color: var(--text); font-size: 13px; font-family: inherit; outline: none;
+    }
+    input:focus, select:focus { border-color: var(--accent); }
+    select option { background: #0d1620; }
+    .hint { font-size: 11px; color: var(--dimmer); margin-top: 5px; line-height: 1.6; }
+    .hint strong { color: #9fb4c4; }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+    .row-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 14px; }
+    .with-btn { display: flex; gap: 8px; }
+    .with-btn input { flex: 1; }
+    .check { display: flex; align-items: flex-start; gap: 9px; }
+    .check input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--accent); margin-top: 2px; }
+    .check .txt { font-size: 13px; }
+    .check .txt .hint { margin-top: 3px; }
+    .radios { display: flex; gap: 18px; flex-wrap: wrap; }
+    .radios label { display: flex; align-items: center; gap: 7px; font-size: 13px; cursor: pointer; }
+    .radios input[type="radio"] { width: 16px; height: 16px; accent-color: var(--accent); }
+    fieldset { border: none; border-top: 1px solid var(--line); padding-top: 16px; margin-top: 6px; }
+    fieldset > legend {
+      font-size: 12px; font-weight: 700; color: var(--accent);
+      text-transform: uppercase; letter-spacing: .6px; padding-bottom: 10px;
+    }
+    .chips { display: flex; gap: 6px; flex-wrap: wrap; }
+    .chip {
+      padding: 6px 12px; border-radius: 999px; border: 1px solid #33475a;
+      background: transparent; color: var(--dim); font-size: 12px; cursor: pointer;
+    }
+    .chip.on { background: #103246; border-color: var(--accent); color: #9fd7ef; }
+    .presets { display: flex; gap: 6px; margin-top: 8px; }
+    .presets button {
+      background: transparent; border: none; color: var(--accent);
+      font-size: 11px; cursor: pointer; padding: 2px 4px; text-decoration: underline;
+    }
+    .method-note {
+      background: #12202b; border: 1px solid var(--line); border-radius: 6px;
+      padding: 10px 12px; font-size: 12px; color: #9fb4c4; margin-top: 8px; line-height: 1.7;
+    }
+
+    /* ---------- dialog ---------- */
+    dialog {
+      /* margin:auto centers a modal dialog — the universal reset above removes it. */
+      margin: auto;
+      border: 1px solid var(--line); border-radius: 12px; background: var(--panel);
+      color: var(--text); padding: 0; width: min(680px, 94vw); max-height: 92vh;
+    }
+    dialog::backdrop { background: rgba(4, 10, 16, .72); }
+    .dlg-head {
+      padding: 16px 22px; border-bottom: 1px solid var(--line);
+      display: flex; align-items: center; gap: 12px; position: sticky; top: 0; background: var(--panel);
+    }
+    .dlg-head h3 { font-size: 16px; color: var(--accent); }
+    .dlg-head .x {
+      margin-left: auto; background: none; border: none; color: var(--dim);
+      font-size: 22px; line-height: 1; cursor: pointer;
+    }
+    .dlg-body { padding: 18px 22px; overflow-y: auto; max-height: calc(92vh - 140px); }
+    .dlg-foot {
+      padding: 14px 22px; border-top: 1px solid var(--line);
+      display: flex; gap: 10px; align-items: center; position: sticky; bottom: 0; background: var(--panel);
+    }
+    .dlg-foot .spacer { margin-left: auto; }
+    .dlg-err { color: var(--bad); font-size: 12px; }
+
+    /* ---------- toast ---------- */
+    #toasts { position: fixed; right: 18px; bottom: 18px; z-index: 50; display: flex; flex-direction: column; gap: 8px; }
+    .toast {
+      background: var(--panel-2); border: 1px solid var(--line); border-left: 3px solid var(--accent);
+      border-radius: 6px; padding: 11px 16px; font-size: 13px; max-width: 380px;
+      box-shadow: 0 8px 24px rgba(0,0,0,.45); animation: slide .2s ease-out;
+    }
+    .toast.ok { border-left-color: var(--ok); }
+    .toast.err { border-left-color: var(--bad); }
+    @keyframes slide { from { transform: translateX(20px); opacity: 0; } }
+
+    @media (max-width: 620px) {
+      .row, .row-3 { grid-template-columns: 1fr; }
+      .container { padding: 16px 12px 48px; }
+      header { padding: 10px 14px; }
+    }
   </style>
 </head>
 <body>
   <header>
-    <h1>Watchdog Monitor</h1>
-    <div style="display:flex;align-items:center;gap:16px;">
-      <span id="header-reboot" style="color:#fbbf24;font-size:13px;display:none;"></span>
-      <div class="clock" id="clock"></div>
-      <button class="btn btn-secondary" id="lang-toggle" onclick="toggleLang()">EN</button>
-      <button class="btn btn-danger" data-i18n="ui.shutdown" onclick="shutdownWatchdog()">Shutdown</button>
+    <h1>Watchdog</h1>
+    <div class="summary" id="summary"></div>
+    <div class="header-right">
+      <span id="header-reboot"></span>
+      <span class="clock" id="clock"></span>
+      <button class="btn btn-ghost btn-sm" id="lang-toggle" onclick="toggleLang()">EN</button>
+      <button class="btn btn-danger-ghost btn-sm" data-i18n="ui.shutdown" onclick="shutdownWatchdog()">Shutdown</button>
     </div>
   </header>
 
   <div class="container">
-    <!-- Global Settings (collapsed by default — rarely changed) -->
-    <details class="collapse">
-      <summary data-i18n="settings.title">Global Settings</summary>
-      <div class="collapse-body">
-        <div class="form-grid">
-          <div>
-            <label for="f-reboot-time" data-i18n="settings.reboot_time">Reboot Time (HH:MM)</label>
-            <input type="text" id="f-reboot-time" placeholder="04:00">
-            <div class="hint" data-i18n="settings.reboot_time_hint">Leave empty to disable scheduled reboot.</div>
-          </div>
-          <div>
-            <label data-i18n="settings.reboot_days">Reboot Days</label>
-            <div class="day-checks" id="reboot-days">
-              <label><input type="checkbox" value="Monday" class="reboot-day"> Mon</label>
-              <label><input type="checkbox" value="Tuesday" class="reboot-day"> Tue</label>
-              <label><input type="checkbox" value="Wednesday" class="reboot-day"> Wed</label>
-              <label><input type="checkbox" value="Thursday" class="reboot-day"> Thu</label>
-              <label><input type="checkbox" value="Friday" class="reboot-day"> Fri</label>
-              <label><input type="checkbox" value="Saturday" class="reboot-day"> Sat</label>
-              <label><input type="checkbox" value="Sunday" class="reboot-day"> Sun</label>
-            </div>
-            <div class="hint" data-i18n="settings.everyday_hint">Empty = every day.</div>
-          </div>
-          <div>
-            <label for="f-log-dir" data-i18n="settings.log_dir">Log Directory</label>
-            <div class="input-with-btn">
-              <input type="text" id="f-log-dir" placeholder="logs" value="logs">
-              <button type="button" class="btn-browse" data-i18n="common.browse" onclick="pickPath('folder', '#f-log-dir')">Browse...</button>
-            </div>
-            <div class="hint" data-i18n="settings.log_dir_hint">Relative to exe or absolute path.</div>
-          </div>
+    <div class="section-head">
+      <h2 data-i18n="ui.apps">監視中のアプリ</h2>
+      <div class="spacer"></div>
+      <button class="btn btn-primary btn-sm" data-i18n="ui.add_app" onclick="openAppDialog(null)">＋ アプリを追加</button>
+    </div>
+    <div class="cards" id="cards"></div>
+
+    <!-- ---------- log ---------- -->
+    <details class="panel" id="log-panel" open>
+      <summary>
+        <span data-i18n="log.title">最近のログ</span>
+        <span class="sub" id="log-file"></span>
+      </summary>
+      <div class="panel-body">
+        <div class="log-toolbar">
+          <label><input type="checkbox" id="log-pause"> <span data-i18n="log.pause">自動更新を止める</span></label>
+          <span data-i18n="log.hint">起動・停止・再起動の記録がここに出ます</span>
         </div>
-        <div class="form-actions">
-          <button class="btn btn-primary" data-i18n="settings.save" onclick="saveSettings()">Save Settings</button>
-          <button class="btn btn-secondary" data-i18n="settings.export" onclick="exportConfig()">Export Config</button>
-          <button class="btn btn-secondary" data-i18n="settings.import" onclick="document.getElementById('import-file').click()">Import Config</button>
-          <input type="file" id="import-file" accept="application/json,.json" style="display:none" onchange="importConfig(this)">
-        </div>
-        <div class="hint" data-i18n="settings.import_hint">Import replaces all settings and restarts apps. Changing web_port needs a restart.</div>
+        <div class="log-box" id="log-box"></div>
       </div>
     </details>
 
-    <!-- App Status Table -->
-    <table>
-      <thead>
-        <tr>
-          <th data-i18n="table.app">App</th>
-          <th data-i18n="table.watch_method">Watch Method</th>
-          <th data-i18n="table.start_schedule">Start / Schedule</th>
-          <th data-i18n="table.status">Status</th>
-          <th>PID</th>
-          <th data-i18n="table.last_heartbeat">Last Heartbeat</th>
-          <th data-i18n="table.actions">Actions</th>
-        </tr>
-      </thead>
-      <tbody id="status-body">
-        <tr><td colspan="7" class="empty-msg" data-i18n="common.loading">Loading...</td></tr>
-      </tbody>
-    </table>
-
-    <!-- Add / Edit App Form -->
-    <div class="form-section">
-      <h2 id="form-title" data-i18n="form.add_title">Add New App</h2>
-      <div class="form-grid">
-        <div>
-          <label for="f-name" data-i18n="form.name">Name</label>
-          <input type="text" id="f-name" placeholder="e.g. TouchDesigner Main">
+    <!-- ---------- commands ---------- -->
+    <details class="panel">
+      <summary>
+        <span data-i18n="cmd.section">スケジュール送信コマンド</span>
+        <span class="sub" data-i18n="cmd.section_sub">UDP / OSC / PJLINK（プロジェクター電源など）</span>
+      </summary>
+      <div class="panel-body">
+        <table>
+          <thead>
+            <tr>
+              <th data-i18n="cmd.col_command">コマンド</th>
+              <th data-i18n="cmd.col_target">宛先</th>
+              <th data-i18n="cmd.col_payload">内容</th>
+              <th data-i18n="cmd.col_schedule">送信タイミング</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="cmd-body"></tbody>
+        </table>
+        <div style="margin-top:14px">
+          <button class="btn btn-ghost btn-sm" data-i18n="cmd.add_title" onclick="openCmdDialog(null)">＋ コマンドを追加</button>
         </div>
-        <div>
-          <label for="f-method" data-i18n="form.watch_method">Watch Method</label>
-          <select id="f-method" onchange="onMethodChange()">
-            <option value="process" data-i18n="form.method_process">Process (PID existence check)</option>
-            <option value="udp" data-i18n="form.method_udp">UDP (heartbeat packet)</option>
-            <option value="file" data-i18n="form.method_file">File (timestamp update)</option>
-            <option value="http" data-i18n="form.method_http">HTTP (health check URL)</option>
-            <option value="window" data-i18n="form.method_window">Window (title existence)</option>
-          </select>
-        </div>
-        <div class="full">
-          <label for="f-exe" data-i18n="form.exe_path">Executable Path</label>
-          <div class="input-with-btn">
-            <input type="text" id="f-exe" placeholder="C:\\Program Files\\...\\app.exe">
-            <button type="button" class="btn-browse" data-i18n="common.browse" onclick="pickPath('exe', '#f-exe', onExePicked)">Browse...</button>
-          </div>
-        </div>
-        <div>
-          <label for="f-timeout" data-i18n="form.timeout">Timeout (sec)</label>
-          <input type="number" id="f-timeout" placeholder="30" value="30">
-        </div>
-
-        <!-- Watch method specific fields -->
-        <div class="full watch-fields">
-          <div class="field-row" id="wf-udp">
-            <label for="f-udp-port" data-i18n="form.udp_port">UDP Port</label>
-            <input type="number" id="f-udp-port" placeholder="9001">
-            <div class="hint" data-i18n="form.udp_port_hint">Heartbeat packet to this port from the app</div>
-          </div>
-          <div class="field-row" id="wf-file">
-            <label for="f-file-path" data-i18n="form.file_path">File Path</label>
-            <div class="input-with-btn">
-              <input type="text" id="f-file-path" placeholder="C:\\tmp\\heartbeat.txt">
-              <button type="button" class="btn-browse" data-i18n="common.browse" onclick="pickPath('file', '#f-file-path')">Browse...</button>
-            </div>
-            <div class="hint" data-i18n="form.file_path_hint">App updates this file periodically; stale = timeout</div>
-          </div>
-          <div class="field-row" id="wf-http">
-            <label for="f-http-url" data-i18n="form.http_url">Health Check URL</label>
-            <input type="text" id="f-http-url" placeholder="http://localhost:3000/health">
-            <div style="margin-top:8px">
-              <label for="f-http-code" data-i18n="form.http_code">Expected Status Code</label>
-              <input type="number" id="f-http-code" placeholder="200" value="200">
-            </div>
-            <div class="hint" data-i18n="form.http_hint">GET request; matching status code = alive</div>
-          </div>
-          <div class="field-row" id="wf-window">
-            <label for="f-window-title" data-i18n="form.window_title">Window Title (partial match)</label>
-            <input type="text" id="f-window-title" placeholder="My Application">
-            <div class="hint" data-i18n="form.window_hint">Checks if a window containing this text exists</div>
-          </div>
-          <div class="field-row" id="wf-process">
-            <div class="hint" data-i18n="form.process_hint">No extra settings needed. Monitors if PID is alive (cannot detect freezes).</div>
-          </div>
-        </div>
+        <div id="cmd-result" class="mono" style="margin-top:10px;font-size:12px"></div>
       </div>
+    </details>
 
-      <details class="advanced">
-        <summary data-i18n="form.advanced">Advanced (ID / Arguments / Start / Schedule)</summary>
-        <div class="form-grid">
-        <div>
-          <label for="f-id" data-i18n="form.id">ID</label>
-          <input type="text" id="f-id" data-i18n-ph="ph.id" placeholder="auto-generated from name">
-          <div class="hint" data-i18n="form.id_hint">Leave empty to auto-generate from the name.</div>
+    <!-- ---------- global settings ---------- -->
+    <details class="panel">
+      <summary>
+        <span data-i18n="settings.title">全体設定</span>
+        <span class="sub" data-i18n="settings.sub">PC再起動 / ログ保存先 / 設定のバックアップ</span>
+      </summary>
+      <div class="panel-body">
+        <fieldset style="border-top:none;padding-top:0">
+          <legend data-i18n="settings.reboot_legend">PCの定時再起動</legend>
+          <div class="row">
+            <div class="field">
+              <label for="f-reboot-time" data-i18n="settings.reboot_time">再起動する時刻</label>
+              <input type="time" id="f-reboot-time">
+              <div class="hint" data-i18n="settings.reboot_time_hint">空欄なら再起動しません。全アプリを停止してからPCを再起動します。</div>
+            </div>
+            <div class="field">
+              <span class="field-label" data-i18n="settings.reboot_days">再起動する曜日</span>
+              <div class="chips" id="reboot-days"></div>
+              <div class="presets" id="reboot-presets"></div>
+              <div class="hint" data-i18n="common.days_hint">選択なし = 毎日</div>
+            </div>
+          </div>
+        </fieldset>
+        <fieldset>
+          <legend data-i18n="settings.log_legend">ログ</legend>
+          <div class="field">
+            <label for="f-log-dir" data-i18n="settings.log_dir">ログの保存先フォルダ</label>
+            <div class="with-btn">
+              <input type="text" id="f-log-dir" placeholder="logs">
+              <button type="button" class="btn btn-ghost" data-i18n="common.browse" onclick="pickPath('folder', '#f-log-dir')">参照...</button>
+            </div>
+            <div class="hint" data-i18n="settings.log_dir_hint">exeからの相対パス、または絶対パス。日付ごとにファイルが分かれます。</div>
+          </div>
+        </fieldset>
+        <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:4px">
+          <button class="btn btn-primary" data-i18n="settings.save" onclick="saveSettings(this)">設定を保存</button>
+          <div class="spacer" style="margin-left:auto"></div>
+          <button class="btn btn-ghost" data-i18n="settings.export" onclick="exportConfig()">設定をバックアップ</button>
+          <button class="btn btn-ghost" data-i18n="settings.import" onclick="document.getElementById('import-file').click()">バックアップから復元</button>
+          <input type="file" id="import-file" accept="application/json,.json" style="display:none" onchange="importConfig(this)">
         </div>
-        <div class="full">
-          <label for="f-args" data-i18n="form.args">Arguments (use "quotes" for paths with spaces)</label>
-          <input type="text" id="f-args" placeholder='e.g. "C:\\My Projects\\main.toe" --verbose'>
-          <div class="hint" data-i18n="form.args_hint">Example: "C:\path with spaces\file.toe" --flag value</div>
+        <div class="hint" data-i18n="settings.import_hint">復元すると全設定が置き換わり、アプリが再起動します。ポート番号を変えた場合はWatchdogの再起動が必要です。</div>
+      </div>
+    </details>
+  </div>
+
+  <!-- ================= app dialog ================= -->
+  <dialog id="app-dialog">
+    <div class="dlg-head">
+      <h3 id="app-dlg-title">アプリを追加</h3>
+      <button class="x" onclick="closeAppDialog()">&times;</button>
+    </div>
+    <div class="dlg-body">
+      <fieldset style="border-top:none;padding-top:0">
+        <legend data-i18n="form.legend_basic">基本</legend>
+        <div class="field">
+          <label for="f-name" data-i18n="form.name">アプリの名前</label>
+          <input type="text" id="f-name" placeholder="例: LED本番プロジェクト">
+          <div class="hint" data-i18n="form.name_hint">画面に表示される名前です。自由に付けられます。</div>
         </div>
-        <div class="checkbox-row">
-          <input type="checkbox" id="f-autostart" checked>
-          <label for="f-autostart" style="margin:0" data-i18n="form.autostart">Auto Start (Watchdog launches the app)</label>
+        <div class="field">
+          <label for="f-exe" data-i18n="form.exe_path">起動するファイル</label>
+          <div class="with-btn">
+            <input type="text" id="f-exe" placeholder="C:\projects\project.mad">
+            <button type="button" class="btn btn-ghost" data-i18n="common.browse" onclick="pickPath('exe', '#f-exe', onExePicked)">参照...</button>
+          </div>
+          <div class="hint" id="exe-hint" data-i18n="form.exe_hint">.exe だけでなく .mad（MadMapper）・.toe（TouchDesigner）などのファイルも指定できます。</div>
         </div>
-        <div>
-          <label for="f-order" data-i18n="form.order">Start Order</label>
-          <input type="number" id="f-order" placeholder="0" value="0">
-          <div class="hint" data-i18n="form.order_hint">Lower = earlier. Same value = parallel.</div>
-        </div>
-        <div>
-          <label for="f-delay" data-i18n="form.delay">Start Delay (sec)</label>
-          <input type="number" id="f-delay" placeholder="0" value="0">
-          <div class="hint" data-i18n="form.delay_hint">Wait this long before starting this app.</div>
-        </div>
-        <div class="checkbox-row">
-          <input type="checkbox" id="f-shell">
-          <label for="f-shell" style="margin:0" data-i18n="form.shell">Use shell open (for .toe files)</label>
-        </div>
-        <div>
-          <label for="f-stopmode" data-i18n="form.stopmode">Stop mode</label>
-          <select id="f-stopmode" onchange="onStopModeChange()">
-            <option value="force" data-i18n="form.stopmode_force">Force kill (immediate taskkill)</option>
-            <option value="graceful" data-i18n="form.stopmode_graceful">Save then quit: keystroke (Ctrl+S)</option>
-            <option value="osc" data-i18n="form.stopmode_osc">Save then quit: OSC</option>
+      </fieldset>
+
+      <fieldset>
+        <legend data-i18n="form.legend_watch">生存の確認方法</legend>
+        <div class="field">
+          <label for="f-method" data-i18n="form.watch_method">確認方法</label>
+          <select id="f-method" onchange="onMethodChange()">
+            <option value="process" data-i18n="form.method_process">プロセスが動いているか（一般的なアプリ）</option>
+            <option value="window" data-i18n="form.method_window">ウィンドウが存在するか</option>
+            <option value="udp" data-i18n="form.method_udp">アプリからのUDP通知を受け取る</option>
+            <option value="http" data-i18n="form.method_http">URLに応答があるか</option>
+            <option value="file" data-i18n="form.method_file">ファイルが更新されているか</option>
           </select>
+          <div class="method-note" id="method-note"></div>
         </div>
-        <div class="full" id="osc-fields" style="display:none;">
-          <div class="form-grid">
+        <div class="field" id="wf-udp" style="display:none">
+          <label for="f-udp-port" data-i18n="form.udp_port">受信するUDPポート</label>
+          <input type="number" id="f-udp-port" placeholder="9001">
+        </div>
+        <div class="field" id="wf-window" style="display:none">
+          <label for="f-window-title" data-i18n="form.window_title">ウィンドウタイトル（部分一致）</label>
+          <input type="text" id="f-window-title" placeholder="MadMapper">
+        </div>
+        <div class="field" id="wf-http" style="display:none">
+          <div class="row">
             <div>
-              <label for="f-osc-host" data-i18n="form.osc_host">OSC Host</label>
+              <label for="f-http-url" data-i18n="form.http_url">確認するURL</label>
+              <input type="text" id="f-http-url" placeholder="http://localhost:3000/health">
+            </div>
+            <div>
+              <label for="f-http-code" data-i18n="form.http_code">正常とみなすコード</label>
+              <input type="number" id="f-http-code" value="200">
+            </div>
+          </div>
+        </div>
+        <div class="field" id="wf-file" style="display:none">
+          <label for="f-file-path" data-i18n="form.file_path">監視するファイル</label>
+          <div class="with-btn">
+            <input type="text" id="f-file-path" placeholder="C:\tmp\heartbeat.txt">
+            <button type="button" class="btn btn-ghost" data-i18n="common.browse" onclick="pickPath('file', '#f-file-path')">参照...</button>
+          </div>
+        </div>
+        <div class="field">
+          <label for="f-timeout" data-i18n="form.timeout">応答が途絶えたと判断する秒数</label>
+          <input type="number" id="f-timeout" value="30" oninput="updateTimeoutNote()">
+          <div class="hint" id="timeout-note"></div>
+        </div>
+      </fieldset>
+
+      <fieldset>
+        <legend data-i18n="form.legend_run">起動と停止</legend>
+        <div class="field">
+          <div class="check">
+            <input type="checkbox" id="f-autostart" checked onchange="updateAutoStartNote()">
+            <span class="txt">
+              <span data-i18n="form.autostart">Watchdogがこのアプリを起動する</span>
+              <span class="hint" id="autostart-note"></span>
+            </span>
+          </div>
+        </div>
+        <div class="field">
+          <label for="f-stopmode" data-i18n="form.stopmode">停止するときの動作</label>
+          <select id="f-stopmode" onchange="onStopModeChange()">
+            <option value="graceful" data-i18n="form.stopmode_graceful">保存して終了（Ctrl+S を送る）</option>
+            <option value="force" data-i18n="form.stopmode_force">保存せずに強制終了</option>
+            <option value="osc" data-i18n="form.stopmode_osc">保存して終了（OSCで送る）</option>
+          </select>
+          <div class="method-note" id="stopmode-note"></div>
+        </div>
+        <div id="osc-fields" style="display:none">
+          <div class="row">
+            <div class="field">
+              <label for="f-osc-host" data-i18n="form.osc_host">送信先ホスト</label>
               <input type="text" id="f-osc-host" placeholder="127.0.0.1">
             </div>
-            <div>
-              <label for="f-osc-port" data-i18n="form.osc_port">OSC Port</label>
+            <div class="field">
+              <label for="f-osc-port" data-i18n="form.osc_port">ポート</label>
               <input type="number" id="f-osc-port" placeholder="8010">
             </div>
-            <div class="full">
-              <label for="f-osc-save" data-i18n="form.osc_save">Save address</label>
-              <input type="text" id="f-osc-save" placeholder="/mmServer/global/save">
-            </div>
-            <div class="full">
-              <label for="f-osc-quit" data-i18n="form.osc_quit">Quit address (fill in once known)</label>
-              <input type="text" id="f-osc-quit" data-i18n-ph="ph.osc_quit" placeholder="(blank = save then kill by PID)">
-              <div class="hint" data-i18n="form.osc_quit_hint">Blank = OSC save then kill by PID. Set the quit address to quit via OSC.</div>
-            </div>
+          </div>
+          <div class="field">
+            <label for="f-osc-save" data-i18n="form.osc_save">保存コマンドのアドレス</label>
+            <input type="text" id="f-osc-save" placeholder="/mmServer/global/save">
+          </div>
+          <div class="field">
+            <label for="f-osc-quit" data-i18n="form.osc_quit">終了コマンドのアドレス（任意）</label>
+            <input type="text" id="f-osc-quit" data-i18n-ph="ph.osc_quit" placeholder="空欄なら保存後にプロセスを終了">
           </div>
         </div>
+      </fieldset>
 
-        <!-- Schedule -->
-        <div class="full" style="margin-top:8px;border-top:1px solid #253545;padding-top:12px;">
-          <label style="font-size:14px;color:#2d9cdb;margin-bottom:8px;display:block;" data-i18n="form.schedule">Schedule (optional)</label>
-          <div class="hint" style="margin-bottom:8px;" data-i18n="form.schedule_hint">Leave start/stop time empty for always-on behavior.</div>
-        </div>
-        <div>
-          <label for="f-sched-start" data-i18n="form.sched_start">Start Time (HH:MM)</label>
-          <input type="text" id="f-sched-start" placeholder="09:00">
-        </div>
-        <div>
-          <label for="f-sched-stop" data-i18n="form.sched_stop">Stop Time (HH:MM)</label>
-          <input type="text" id="f-sched-stop" placeholder="18:00">
-        </div>
-        <div class="full">
-          <label data-i18n="form.active_days">Active Days (empty = every day)</label>
-          <div class="day-checks" id="sched-days">
-            <label><input type="checkbox" value="Monday" class="sched-day"> Mon</label>
-            <label><input type="checkbox" value="Tuesday" class="sched-day"> Tue</label>
-            <label><input type="checkbox" value="Wednesday" class="sched-day"> Wed</label>
-            <label><input type="checkbox" value="Thursday" class="sched-day"> Thu</label>
-            <label><input type="checkbox" value="Friday" class="sched-day"> Fri</label>
-            <label><input type="checkbox" value="Saturday" class="sched-day"> Sat</label>
-            <label><input type="checkbox" value="Sunday" class="sched-day"> Sun</label>
+      <fieldset>
+        <legend data-i18n="form.legend_sched">稼働時間</legend>
+        <div class="field">
+          <div class="radios">
+            <label><input type="radio" name="sched-mode" value="always" onchange="onSchedModeChange()"> <span data-i18n="form.sched_always">24時間ずっと動かす</span></label>
+            <label><input type="radio" name="sched-mode" value="window" onchange="onSchedModeChange()"> <span data-i18n="form.sched_window">時間帯を決める</span></label>
           </div>
         </div>
+        <div id="sched-fields" style="display:none">
+          <div class="row">
+            <div class="field">
+              <label for="f-sched-start" data-i18n="form.sched_start">起動する時刻</label>
+              <input type="time" id="f-sched-start">
+            </div>
+            <div class="field">
+              <label for="f-sched-stop" data-i18n="form.sched_stop">停止する時刻</label>
+              <input type="time" id="f-sched-stop">
+            </div>
+          </div>
+          <div class="field">
+            <span class="field-label" data-i18n="form.active_days">稼働する曜日</span>
+            <div class="chips" id="sched-days"></div>
+            <div class="presets" id="sched-presets"></div>
+            <div class="hint" id="sched-note"></div>
+          </div>
+        </div>
+      </fieldset>
+
+      <details class="panel" style="margin-top:4px;background:transparent;border-color:var(--line)">
+        <summary><span data-i18n="form.legend_adv">詳細設定（通常は変更不要）</span></summary>
+        <div class="panel-body">
+          <div class="field">
+            <label for="f-args" data-i18n="form.args">起動時の引数</label>
+            <input type="text" id="f-args" placeholder='"C:\path with spaces\file.toe" --flag'>
+            <div class="hint" data-i18n="form.args_hint">スペースを含むパスは "引用符" で囲みます。</div>
+          </div>
+          <div class="field">
+            <div class="check">
+              <input type="checkbox" id="f-shell">
+              <span class="txt">
+                <span data-i18n="form.shell">関連付けで開く（ダブルクリック相当）</span>
+                <span class="hint" data-i18n="form.shell_hint">.exe 以外のファイルを選ぶと自動でONになります。MadMapperやTouchDesignerのファイルはこれが必要です。</span>
+              </span>
+            </div>
+          </div>
+          <div class="row">
+            <div class="field">
+              <label for="f-order" data-i18n="form.order">起動する順番</label>
+              <input type="number" id="f-order" value="0">
+              <div class="hint" data-i18n="form.order_hint">小さいほど先に起動します。</div>
+            </div>
+            <div class="field">
+              <label for="f-delay" data-i18n="form.delay">起動前の待ち時間（秒）</label>
+              <input type="number" id="f-delay" value="0">
+            </div>
+          </div>
+          <div class="field">
+            <label for="f-id" data-i18n="form.id">ID</label>
+            <input type="text" id="f-id" data-i18n-ph="ph.id" placeholder="名前から自動で作られます">
+            <div class="hint" data-i18n="form.id_hint">設定ファイル内での識別子。後から変更できません。</div>
+          </div>
         </div>
       </details>
-      <div class="form-actions">
-        <button class="btn btn-primary" id="btn-save" onclick="saveApp()">Add App</button>
-        <button class="btn btn-secondary" id="btn-cancel" onclick="cancelEdit()" style="display:none">Cancel</button>
-      </div>
     </div>
+    <div class="dlg-foot">
+      <span class="dlg-err" id="app-dlg-err"></span>
+      <div class="spacer"></div>
+      <button class="btn btn-ghost" data-i18n="common.cancel" onclick="closeAppDialog()">キャンセル</button>
+      <button class="btn btn-primary" id="app-dlg-save" onclick="saveApp(this)">保存</button>
+    </div>
+  </dialog>
 
-    <!-- Scheduled Commands -->
-    <h2 id="cmd-section-title" style="color:#2d9cdb;font-size:18px;margin:8px 0 16px;border-top:1px solid #253545;padding-top:24px;" data-i18n="cmd.section">Scheduled Commands (UDP / OSC / PJLINK)</h2>
-    <table>
-      <thead>
-        <tr>
-          <th data-i18n="cmd.col_command">Command</th>
-          <th data-i18n="cmd.col_type">Type</th>
-          <th data-i18n="cmd.col_target">Target</th>
-          <th data-i18n="cmd.col_payload">Payload</th>
-          <th data-i18n="cmd.col_schedule">Schedule</th>
-          <th data-i18n="cmd.col_enabled">Enabled</th>
-          <th data-i18n="table.actions">Actions</th>
-        </tr>
-      </thead>
-      <tbody id="cmd-body">
-        <tr><td colspan="7" class="empty-msg" data-i18n="cmd.no_commands">No commands.</td></tr>
-      </tbody>
-    </table>
-
-    <div class="form-section">
-      <h2 id="cmd-form-title" data-i18n="cmd.add_title">Add Command</h2>
-      <div class="form-grid">
-        <div>
-          <label for="c-name" data-i18n="cmd.name">Name</label>
-          <input type="text" id="c-name" placeholder="e.g. Projector Power On">
-        </div>
-        <div>
-          <label for="c-type" data-i18n="cmd.type">Type</label>
+  <!-- ================= command dialog ================= -->
+  <dialog id="cmd-dialog">
+    <div class="dlg-head">
+      <h3 id="cmd-dlg-title">コマンドを追加</h3>
+      <button class="x" onclick="closeCmdDialog()">&times;</button>
+    </div>
+    <div class="dlg-body">
+      <div class="field">
+        <label for="c-name" data-i18n="cmd.name">コマンドの名前</label>
+        <input type="text" id="c-name" placeholder="例: プロジェクター電源ON">
+      </div>
+      <div class="row-3">
+        <div class="field">
+          <label for="c-type" data-i18n="cmd.type">種別</label>
           <select id="c-type" onchange="onCmdTypeChange()">
             <option value="udp">UDP</option>
             <option value="osc">OSC</option>
             <option value="pjlink">PJLINK</option>
           </select>
         </div>
-        <div>
-          <label for="c-host" data-i18n="cmd.host">Host (IP)</label>
+        <div class="field">
+          <label for="c-host" data-i18n="cmd.host">宛先IP</label>
           <input type="text" id="c-host" placeholder="192.168.0.10">
         </div>
-        <div>
-          <label for="c-port" data-i18n="cmd.port">Port</label>
-          <input type="number" id="c-port" placeholder="PJLINK=4352">
+        <div class="field">
+          <label for="c-port" data-i18n="cmd.port">ポート</label>
+          <input type="number" id="c-port" data-i18n-ph="ph.cmd_port" placeholder="PJLINKなら4352">
         </div>
-
-        <div class="full cmd-fields" id="cf-udp">
-          <label for="c-payload" data-i18n="cmd.payload">Payload</label>
-          <input type="text" id="c-payload" data-i18n-ph="ph.cmd_payload" placeholder="text to send, or HEX bytes">
-          <div class="checkbox-row" style="padding-top:8px">
+      </div>
+      <div id="cf-udp">
+        <div class="field">
+          <label for="c-payload" data-i18n="cmd.payload">送信する内容</label>
+          <input type="text" id="c-payload" data-i18n-ph="ph.cmd_payload" placeholder="送信する文字列、またはHEXバイト">
+          <div class="check" style="margin-top:9px">
             <input type="checkbox" id="c-hex">
-            <label for="c-hex" style="margin:0" data-i18n="cmd.hex">Send as HEX (e.g. 01 0A FF)</label>
+            <span class="txt" data-i18n="cmd.hex">HEXとして送信（例: 01 0A FF）</span>
           </div>
         </div>
-
-        <div class="full cmd-fields" id="cf-osc" style="display:none">
-          <label for="c-osc-addr" data-i18n="cmd.osc_addr">OSC Address</label>
-          <input type="text" id="c-osc-addr" placeholder="/cue/1/start">
-          <div style="margin-top:8px">
-            <label for="c-osc-args" data-i18n="cmd.osc_args">Arguments (space-separated; int/float/string auto-detected)</label>
-            <input type="text" id="c-osc-args" placeholder="1 0.5 hello">
-          </div>
+      </div>
+      <div id="cf-osc" style="display:none">
+        <div class="field">
+          <label for="c-osc-addr" data-i18n="cmd.osc_addr">OSCアドレス</label>
+          <input type="text" id="c-osc-addr" placeholder="/dimmer">
         </div>
-
-        <div class="full cmd-fields" id="cf-pjlink" style="display:none">
-          <label for="c-pj-cmd" data-i18n="cmd.pj_cmd">PJLINK Command</label>
+        <div class="field">
+          <label for="c-osc-args" data-i18n="cmd.osc_args">引数</label>
+          <input type="text" id="c-osc-args" placeholder="1 0.5 hello">
+          <div class="hint" data-i18n="cmd.osc_args_hint">スペース区切り。整数・小数・文字列を自動判定します。</div>
+        </div>
+      </div>
+      <div id="cf-pjlink" style="display:none">
+        <div class="field">
+          <label for="c-pj-cmd" data-i18n="cmd.pj_cmd">PJLINKコマンド</label>
           <input type="text" id="c-pj-cmd" placeholder="POWR 1">
-          <div style="margin-top:6px;display:flex;gap:8px;">
-            <button type="button" class="btn-browse" data-i18n="cmd.pj_on" onclick="$('#c-pj-cmd').value='POWR 1'">Power On (POWR 1)</button>
-            <button type="button" class="btn-browse" data-i18n="cmd.pj_off" onclick="$('#c-pj-cmd').value='POWR 0'">Power Off (POWR 0)</button>
-          </div>
-          <div style="margin-top:8px">
-            <label for="c-pj-pass" data-i18n="cmd.pj_pass">Password (blank = no auth)</label>
-            <input type="text" id="c-pj-pass" data-i18n-ph="ph.pj_pass" placeholder="blank if no auth">
+          <div class="presets">
+            <button type="button" onclick="setPj('POWR 1')" data-i18n="cmd.pj_on">電源ON</button>
+            <button type="button" onclick="setPj('POWR 0')" data-i18n="cmd.pj_off">電源OFF</button>
           </div>
         </div>
-
-        <div>
-          <label for="c-time" data-i18n="cmd.time">Time (HH:MM; blank = manual only)</label>
-          <input type="text" id="c-time" placeholder="08:55">
+        <div class="field">
+          <label for="c-pj-pass" data-i18n="cmd.pj_pass">パスワード</label>
+          <input type="text" id="c-pj-pass" data-i18n-ph="ph.pj_pass" placeholder="認証なしなら空欄">
         </div>
-        <div class="checkbox-row">
+      </div>
+      <fieldset>
+        <legend data-i18n="cmd.legend_when">送信タイミング</legend>
+        <div class="row">
+          <div class="field">
+            <label for="c-time" data-i18n="cmd.time">送信する時刻</label>
+            <input type="time" id="c-time">
+            <div class="hint" data-i18n="cmd.time_hint">空欄なら、テスト送信ボタンからの手動送信のみになります。</div>
+          </div>
+          <div class="field">
+            <span class="field-label" data-i18n="cmd.days">送信する曜日</span>
+            <div class="chips" id="cmd-days"></div>
+            <div class="presets" id="cmd-presets"></div>
+            <div class="hint" data-i18n="common.days_hint">選択なし = 毎日</div>
+          </div>
+        </div>
+        <div class="check">
           <input type="checkbox" id="c-enabled" checked>
-          <label for="c-enabled" style="margin:0" data-i18n="cmd.enabled">Enabled (scheduled firing)</label>
+          <span class="txt" data-i18n="cmd.enabled">時刻になったら自動で送信する</span>
         </div>
-        <div class="full">
-          <label data-i18n="cmd.days">Days (empty = every day)</label>
-          <div class="day-checks" id="cmd-days">
-            <label><input type="checkbox" value="Monday" class="cmd-day"> Mon</label>
-            <label><input type="checkbox" value="Tuesday" class="cmd-day"> Tue</label>
-            <label><input type="checkbox" value="Wednesday" class="cmd-day"> Wed</label>
-            <label><input type="checkbox" value="Thursday" class="cmd-day"> Thu</label>
-            <label><input type="checkbox" value="Friday" class="cmd-day"> Fri</label>
-            <label><input type="checkbox" value="Saturday" class="cmd-day"> Sat</label>
-            <label><input type="checkbox" value="Sunday" class="cmd-day"> Sun</label>
-          </div>
-        </div>
-      </div>
-      <div class="form-actions">
-        <button class="btn btn-primary" id="cmd-save" onclick="saveCommand()">Add Command</button>
-        <button class="btn btn-secondary" data-i18n="cmd.test_fire" onclick="fireCommandForm()">Test fire</button>
-        <button class="btn btn-secondary" id="cmd-cancel" onclick="cancelCmdEdit()" style="display:none">Cancel</button>
-      </div>
-      <div id="cmd-result" style="margin-top:10px;font-size:13px;font-family:Consolas,monospace;"></div>
+      </fieldset>
+      <div id="cmd-dlg-result" class="mono" style="font-size:12px;margin-top:6px"></div>
     </div>
-  </div>
+    <div class="dlg-foot">
+      <span class="dlg-err" id="cmd-dlg-err"></span>
+      <div class="spacer"></div>
+      <button class="btn btn-ghost" data-i18n="cmd.test_fire" onclick="fireCommandForm(this)">テスト送信</button>
+      <button class="btn btn-ghost" data-i18n="common.cancel" onclick="closeCmdDialog()">キャンセル</button>
+      <button class="btn btn-primary" id="cmd-dlg-save" onclick="saveCommand(this)">保存</button>
+    </div>
+  </dialog>
+
+  <div id="toasts"></div>
 
   <script>
-    // ---------------------------------------------------------------------
+    // =====================================================================
     // i18n
-    // ---------------------------------------------------------------------
+    // =====================================================================
     const I18N = {
       ja: {
-        'ui.shutdown': 'シャットダウン',
-        'settings.title': '全体設定',
-        'settings.reboot_time': '再起動時刻 (HH:MM)',
-        'settings.reboot_time_hint': '空欄でスケジュール再起動を無効化。',
-        'settings.reboot_days': '再起動する曜日',
-        'settings.everyday_hint': '空=毎日。',
-        'settings.log_dir': 'ログ出力先',
-        'settings.log_dir_hint': 'exeからの相対パス、または絶対パス。',
-        'settings.save': '設定を保存',
-        'settings.export': '設定をエクスポート',
-        'settings.import': '設定をインポート',
-        'settings.import_hint': 'インポートすると全設定が置き換わり、アプリが再起動します。web_port の変更は再起動後に有効。',
+        'ui.shutdown': 'Watchdogを終了',
+        'ui.apps': '監視中のアプリ',
+        'ui.add_app': '＋ アプリを追加',
         'common.browse': '参照...',
+        'common.cancel': 'キャンセル',
+        'common.save': '保存',
+        'common.edit': '設定',
+        'common.delete': '削除',
+        'common.test': 'テスト送信',
+        'common.days_hint': '選択なし = 毎日',
         'common.loading': '読み込み中...',
-        'table.app': 'アプリ',
-        'table.watch_method': '監視方法',
-        'table.start_schedule': '起動 / スケジュール',
-        'table.status': '状態',
-        'table.last_heartbeat': '最終応答',
-        'table.actions': '操作',
-        'table.no_apps': 'アプリが登録されていません。',
-        'form.add_title': '新規アプリ追加',
-        'form.edit_prefix': 'アプリ編集: ',
-        'form.add_btn': 'アプリ追加',
-        'form.update_btn': '更新',
-        'form.name': '名前',
-        'form.watch_method': '監視方法',
-        'form.method_process': 'Process (PIDの存在確認)',
-        'form.method_udp': 'UDP (ハートビートパケット)',
-        'form.method_file': 'File (タイムスタンプ更新)',
-        'form.method_http': 'HTTP (ヘルスチェックURL)',
-        'form.method_window': 'Window (タイトル存在確認)',
-        'form.exe_path': '実行ファイルパス',
-        'form.timeout': 'タイムアウト (秒)',
-        'form.udp_port': 'UDPポート',
-        'form.udp_port_hint': 'アプリからこのポートへハートビートを送信',
-        'form.file_path': 'ファイルパス',
-        'form.file_path_hint': 'アプリが定期更新するファイル。古い=タイムアウト',
-        'form.http_url': 'ヘルスチェックURL',
-        'form.http_code': '期待するステータスコード',
-        'form.http_hint': 'GETリクエスト。一致するコード=生存',
-        'form.window_title': 'ウィンドウタイトル (部分一致)',
-        'form.window_hint': 'この文字列を含むウィンドウの存在を確認',
-        'form.process_hint': '追加設定なし。PIDの生存を監視（フリーズは検知不可）。',
-        'form.advanced': '詳細設定 (ID / 引数 / 起動設定 / スケジュール)',
+        'sum.running': '稼働中',
+        'sum.stopped': '停止中',
+        'sum.waiting': '時間外',
+        'sum.disabled': '無効',
+        'state.running': '稼働中',
+        'state.starting': '起動中',
+        'state.stopped': '停止中',
+        'state.waiting': '稼働時間外',
+        'state.disabled': '無効',
+        'card.no_apps': '監視するアプリがまだ登録されていません。',
+        'card.target': '対象',
+        'card.watch': '確認方法',
+        'card.stopmode': '停止時の動作',
+        'card.schedule': '稼働時間帯',
+        'card.uptime': '連続稼働',
+        'card.pid': 'プロセスID',
+        'card.heartbeat': '最後の応答',
+        'card.restarts': '自動再起動',
+        'card.restarts_unit': '回',
+        'card.always': '24時間',
+        'card.everyday': '毎日',
+        'card.watch_only': '監視のみ（起動はしない）',
+        'card.auto': 'Watchdogが起動',
+        'card.warn_restarts': '自動再起動が %s 回続いています。復旧できていない可能性があります。ログを確認してください。',
+        'card.next_start': '次の起動 %s',
+        'card.btn_stop': '停止（%s）',
+        'card.btn_stop_sub': '監視も無効になります',
+        'card.btn_disable': '監視を無効にする',
+        'card.btn_enable': '有効にして起動',
+        'card.btn_enable_watch': '監視を有効にする',
+        'card.busy_stop': '停止中...',
+        'card.busy_start': '起動中...',
+        'stop.force': '強制終了',
+        'stop.graceful': '保存して終了',
+        'stop.osc': 'OSCで保存して終了',
+        'watch.process': 'プロセス',
+        'watch.window': 'ウィンドウ',
+        'watch.udp': 'UDP',
+        'watch.http': 'HTTP',
+        'watch.file': 'ファイル',
+        'log.title': '最近のログ',
+        'log.pause': '自動更新を止める',
+        'log.hint': '起動・停止・再起動の記録がここに出ます',
+        'log.empty': 'ログはまだありません。',
+        'settings.title': '全体設定',
+        'settings.sub': 'PC再起動 / ログ保存先 / 設定のバックアップ',
+        'settings.reboot_legend': 'PCの定時再起動',
+        'settings.reboot_time': '再起動する時刻',
+        'settings.reboot_time_hint': '空欄なら再起動しません。全アプリを停止してからPCを再起動します。',
+        'settings.reboot_days': '再起動する曜日',
+        'settings.log_legend': 'ログ',
+        'settings.log_dir': 'ログの保存先フォルダ',
+        'settings.log_dir_hint': 'exeからの相対パス、または絶対パス。日付ごとにファイルが分かれます。',
+        'settings.save': '設定を保存',
+        'settings.export': '設定をバックアップ',
+        'settings.import': 'バックアップから復元',
+        'settings.import_hint': '復元すると全設定が置き換わり、アプリが再起動します。ポート番号を変えた場合はWatchdogの再起動が必要です。',
+        'settings.saved': '設定を保存しました。',
+        'form.add_title': 'アプリを追加',
+        'form.edit_title': '設定: %s',
+        'form.legend_basic': '基本',
+        'form.legend_watch': '生存の確認方法',
+        'form.legend_run': '起動と停止',
+        'form.legend_sched': '稼働時間',
+        'form.legend_adv': '詳細設定（通常は変更不要）',
+        'form.name': 'アプリの名前',
+        'form.name_hint': '画面に表示される名前です。自由に付けられます。',
+        'form.exe_path': '起動するファイル',
+        'form.exe_hint': '.exe だけでなく .mad（MadMapper）・.toe（TouchDesigner）などのファイルも指定できます。',
+        'form.exe_hint_shell': '関連付けで開くファイルとして設定しました（ダブルクリックと同じ動作）。',
+        'form.watch_method': '確認方法',
+        'form.method_process': 'プロセスが動いているか（一般的なアプリ）',
+        'form.method_window': 'ウィンドウが存在するか',
+        'form.method_udp': 'アプリからのUDP通知を受け取る',
+        'form.method_http': 'URLに応答があるか',
+        'form.method_file': 'ファイルが更新されているか',
+        'form.note_process': 'プロセスが生きているかを確認します。MadMapperやTouchDesignerはこれで十分です。ただし<strong>フリーズは検知できません</strong>（プロセスは生きているため）。',
+        'form.note_window': '指定した文字列を含むウィンドウがあるかを確認します。ウィンドウが消えたら再起動します。',
+        'form.note_udp': 'アプリ側から定期的にUDPパケットを送る必要があります。自作アプリやTouchDesignerのように送信できる場合に使います。',
+        'form.note_http': '指定URLへ定期的にGETし、応答コードが一致すれば正常と判断します。',
+        'form.note_file': 'アプリが定期的に書き込むファイルの更新時刻を見ます。更新が止まったら再起動します。',
+        'form.udp_port': '受信するUDPポート',
+        'form.window_title': 'ウィンドウタイトル（部分一致）',
+        'form.http_url': '確認するURL',
+        'form.http_code': '正常とみなすコード',
+        'form.file_path': '監視するファイル',
+        'form.timeout': '応答が途絶えたと判断する秒数',
+        'form.timeout_note': '%s秒 応答がないと、プロセスを終了して自動的に起動し直します。',
+        'form.autostart': 'Watchdogがこのアプリを起動する',
+        'form.autostart_on': 'OFFにすると、すでに動いているアプリを監視するだけになります。',
+        'form.autostart_off': '現在OFF：起動はせず、動いているアプリを見つけて監視します。',
+        'form.stopmode': '停止するときの動作',
+        'form.stopmode_graceful': '保存して終了（Ctrl+S を送る）',
+        'form.stopmode_force': '保存せずに強制終了',
+        'form.stopmode_osc': '保存して終了（OSCで送る）',
+        'form.note_graceful': 'ウィンドウを前面に出して Ctrl+S を送り、保存を待ってから終了します。<strong>MadMapper 6.1.2 で保存されることを実測確認済み</strong>。停止に最大20秒かかります。',
+        'form.note_force': '即座に終了します。<strong>保存されません。</strong>編集内容を残す必要がなければこれで十分です。',
+        'form.note_osc': 'OSCで保存コマンドを送ってから終了します。<strong>MadMapperでは保存されませんでした</strong>（アプリ側が保存用OSCに対応している場合のみ使ってください）。',
+        'form.osc_host': '送信先ホスト',
+        'form.osc_port': 'ポート',
+        'form.osc_save': '保存コマンドのアドレス',
+        'form.osc_quit': '終了コマンドのアドレス（任意）',
+        'form.sched_always': '24時間ずっと動かす',
+        'form.sched_window': '時間帯を決める',
+        'form.sched_start': '起動する時刻',
+        'form.sched_stop': '停止する時刻',
+        'form.active_days': '稼働する曜日',
+        'form.sched_note': '%s に起動し、%s に停止します（%s）。',
+        'form.sched_note_overnight': '%s に起動し、翌日の %s に停止します（%s）。日をまたぐ設定もそのまま使えます。',
+        'form.args': '起動時の引数',
+        'form.args_hint': 'スペースを含むパスは "引用符" で囲みます。',
+        'form.shell': '関連付けで開く（ダブルクリック相当）',
+        'form.shell_hint': '.exe 以外のファイルを選ぶと自動でONになります。MadMapperやTouchDesignerのファイルはこれが必要です。',
+        'form.order': '起動する順番',
+        'form.order_hint': '小さいほど先に起動します。',
+        'form.delay': '起動前の待ち時間（秒）',
         'form.id': 'ID',
-        'form.id_hint': '空欄なら名前から自動生成。',
-        'form.args': '引数（スペースを含むパスは"引用符"で）',
-        'form.args_hint': '例: "C:\\path with spaces\\file.toe" --flag value',
-        'form.autostart': '自動起動（Watchdogがアプリを起動）',
-        'form.order': '起動順',
-        'form.order_hint': '小さいほど先。同値=並列。',
-        'form.delay': '起動遅延 (秒)',
-        'form.delay_hint': 'このアプリの起動前に待機する秒数。',
-        'form.shell': 'シェル起動を使う（.toe等の関連付け起動）',
-        'form.stopmode': '停止方法',
-        'form.stopmode_force': '強制終了 (即 taskkill)',
-        'form.stopmode_graceful': '保存して終了：キー送信 (Ctrl+S)',
-        'form.stopmode_osc': '保存して終了：OSC送信',
-        'form.osc_host': 'OSC Host',
-        'form.osc_port': 'OSC Port',
-        'form.osc_save': 'Save アドレス',
-        'form.osc_quit': 'Quit アドレス（判明したら入力）',
-        'form.osc_quit_hint': '空欄なら OSCで保存→PIDで終了。終了アドレスを入れると OSCで終了。',
-        'form.schedule': 'スケジュール（任意）',
-        'form.schedule_hint': '開始/終了時刻を空にすると常時稼働。',
-        'form.sched_start': '開始時刻 (HH:MM)',
-        'form.sched_stop': '終了時刻 (HH:MM)',
-        'form.active_days': '稼働曜日（空=毎日）',
-        'cmd.section': 'スケジュール送信コマンド (UDP / OSC / PJLINK)',
+        'form.id_hint': '設定ファイル内での識別子。後から変更できません。',
+        'preset.everyday': '毎日',
+        'preset.weekday': '平日',
+        'preset.weekend': '土日',
+        'cmd.section': 'スケジュール送信コマンド',
+        'cmd.section_sub': 'UDP / OSC / PJLINK（プロジェクター電源など）',
         'cmd.col_command': 'コマンド',
-        'cmd.col_type': '種別',
         'cmd.col_target': '宛先',
-        'cmd.col_payload': 'ペイロード',
-        'cmd.col_schedule': 'スケジュール',
-        'cmd.col_enabled': '有効',
-        'cmd.no_commands': 'コマンドがありません。',
-        'cmd.add_title': 'コマンド追加',
-        'cmd.edit_prefix': 'コマンド編集: ',
-        'cmd.add_btn': 'コマンド追加',
-        'cmd.update_btn': '更新',
-        'cmd.name': '名前',
+        'cmd.col_payload': '内容',
+        'cmd.col_schedule': '送信タイミング',
+        'cmd.no_commands': 'コマンドはまだ登録されていません。',
+        'cmd.add_title': '＋ コマンドを追加',
+        'cmd.dlg_add': 'コマンドを追加',
+        'cmd.dlg_edit': 'コマンド: %s',
+        'cmd.name': 'コマンドの名前',
         'cmd.type': '種別',
-        'cmd.host': 'ホスト (IP)',
+        'cmd.host': '宛先IP',
         'cmd.port': 'ポート',
-        'cmd.payload': 'ペイロード',
+        'cmd.payload': '送信する内容',
         'cmd.hex': 'HEXとして送信（例: 01 0A FF）',
-        'cmd.osc_addr': 'OSC Address',
-        'cmd.osc_args': '引数（スペース区切り・int/float/文字列を自動判定）',
-        'cmd.pj_cmd': 'PJLINK コマンド',
-        'cmd.pj_on': '電源ON (POWR 1)',
-        'cmd.pj_off': '電源OFF (POWR 0)',
-        'cmd.pj_pass': 'パスワード（空=認証なし）',
-        'cmd.time': '時刻 (HH:MM、空=手動のみ)',
-        'cmd.enabled': '有効（スケジュール発火）',
-        'cmd.days': '曜日（空=毎日）',
-        'cmd.test_fire': 'テスト発火',
-        'dyn.enable': '有効化',
-        'dyn.disable': '無効化',
-        'dyn.edit': '編集',
-        'dyn.delete': '削除',
-        'dyn.test': 'テスト',
-        'dyn.auto': '自動',
-        'dyn.watch_only': '監視のみ',
-        'dyn.always': '常時',
-        'dyn.everyday': '毎日',
-        'dyn.manual_only': '手動のみ',
-        'dyn.timeout': 'タイムアウト',
-        'dyn.sending': '送信中 ...',
-        'status.running': '稼働中',
-        'status.stopped': '停止',
-        'status.starting': '起動中',
-        'status.disabled': '無効',
-        'reboot.prefix': '再起動: ',
-        'reboot.everyday': '（毎日）',
-        'msg.req_app': '名前・実行ファイルパス・タイムアウトは必須です。',
-        'msg.req_udp': 'UDP監視にはUDPポートが必須です。',
-        'msg.error_prefix': 'エラー: ',
-        'msg.req_failed': 'リクエスト失敗: ',
-        'msg.del_app': '「%s」を削除してプロセスを終了しますか？',
-        'msg.toggle_failed': '切り替えに失敗しました',
-        'msg.delete_failed': '削除に失敗しました',
-        'msg.shutdown_confirm': 'Watchdogを終了しますか？監視中の全プロセスが終了します。',
-        'msg.shutdown_done': 'Watchdogを終了しました。',
-        'msg.req_cmd': '名前とホストは必須です',
-        'msg.req_host': 'ホストを入力してください',
-        'msg.dialog_failed': 'ダイアログを開けませんでした',
+        'cmd.osc_addr': 'OSCアドレス',
+        'cmd.osc_args': '引数',
+        'cmd.osc_args_hint': 'スペース区切り。整数・小数・文字列を自動判定します。',
+        'cmd.pj_cmd': 'PJLINKコマンド',
+        'cmd.pj_on': '電源ON',
+        'cmd.pj_off': '電源OFF',
+        'cmd.pj_pass': 'パスワード',
+        'cmd.legend_when': '送信タイミング',
+        'cmd.time': '送信する時刻',
+        'cmd.time_hint': '空欄なら、テスト送信ボタンからの手動送信のみになります。',
+        'cmd.days': '送信する曜日',
+        'cmd.enabled': '時刻になったら自動で送信する',
+        'cmd.test_fire': 'テスト送信',
+        'cmd.manual_only': '手動のみ',
+        'cmd.auto_off': '自動送信オフ',
+        'cmd.sending': '送信中 ...',
+        'reboot.prefix': 'PC再起動 ',
+        'msg.req_name_exe': '名前と起動するファイルは必須です。',
+        'msg.req_timeout': '応答が途絶えたと判断する秒数は1以上で入力してください。',
+        'msg.req_udp': 'UDPで確認する場合はポート番号が必要です。',
+        'msg.req_window': 'ウィンドウタイトルを入力してください。',
+        'msg.req_http': '確認するURLを入力してください。',
+        'msg.req_file': '監視するファイルを指定してください。',
+        'msg.req_sched': '起動する時刻と停止する時刻の両方を入力してください。',
+        'msg.req_cmd': 'コマンドの名前と宛先IPは必須です。',
+        'msg.req_host': '宛先IPを入力してください。',
+        'msg.saved': '保存しました。',
+        'msg.deleted': '削除しました。',
+        'msg.stopped': '「%s」を停止しました。',
+        'msg.started': '「%s」を有効にしました。',
+        'msg.del_app': '「%s」を削除します。監視中のプロセスも終了します。よろしいですか？',
         'msg.del_cmd': 'コマンド「%s」を削除しますか？',
-        'msg.import_confirm': '設定をインポートすると現在の全設定が置き換わり、監視中のアプリが再起動します。続行しますか？',
+        'msg.confirm_force': '「%s」を保存せずに強制終了します。よろしいですか？',
+        'msg.shutdown_confirm': 'Watchdogを終了します。監視中のアプリも停止します。よろしいですか？',
+        'msg.shutdown_done': 'Watchdogを終了しました。',
+        'msg.import_confirm': 'バックアップから復元すると現在の全設定が置き換わり、監視中のアプリが再起動します。続行しますか？',
         'msg.import_bad_json': 'JSONとして読み込めませんでした: ',
-        'msg.import_ok': '設定をインポートしました（アプリ %s 件）。',
-        'msg.import_restart': 'web_port を変更したため、反映には Watchdog の再起動が必要です。',
-        'ph.id': '名前から自動生成',
+        'msg.import_ok': '設定を復元しました（アプリ %s 件）。',
+        'msg.import_restart': 'ポート番号が変わったため、反映にはWatchdogの再起動が必要です。',
+        'msg.failed': '失敗しました: ',
+        'msg.dialog_failed': 'ファイル選択ダイアログを開けませんでした。',
+        'ph.id': '名前から自動で作られます',
         'ph.cmd_payload': '送信する文字列、またはHEXバイト',
+        'ph.cmd_port': 'PJLINKなら4352',
         'ph.pj_pass': '認証なしなら空欄',
-        'ph.osc_quit': '(空欄=保存後にPIDで終了)'
+        'ph.osc_quit': '空欄なら保存後にプロセスを終了'
       },
       en: {
-        'ui.shutdown': 'Shutdown',
-        'settings.title': 'Global Settings',
-        'settings.reboot_time': 'Reboot Time (HH:MM)',
-        'settings.reboot_time_hint': 'Leave empty to disable scheduled reboot.',
-        'settings.reboot_days': 'Reboot Days',
-        'settings.everyday_hint': 'Empty = every day.',
-        'settings.log_dir': 'Log Directory',
-        'settings.log_dir_hint': 'Relative to exe or absolute path.',
-        'settings.save': 'Save Settings',
-        'settings.export': 'Export Config',
-        'settings.import': 'Import Config',
-        'settings.import_hint': 'Import replaces all settings and restarts apps. Changing web_port needs a restart.',
+        'ui.shutdown': 'Shut down Watchdog',
+        'ui.apps': 'Monitored apps',
+        'ui.add_app': '+ Add app',
         'common.browse': 'Browse...',
+        'common.cancel': 'Cancel',
+        'common.save': 'Save',
+        'common.edit': 'Settings',
+        'common.delete': 'Delete',
+        'common.test': 'Test send',
+        'common.days_hint': 'Nothing selected = every day',
         'common.loading': 'Loading...',
-        'table.app': 'App',
-        'table.watch_method': 'Watch Method',
-        'table.start_schedule': 'Start / Schedule',
-        'table.status': 'Status',
-        'table.last_heartbeat': 'Last Heartbeat',
-        'table.actions': 'Actions',
-        'table.no_apps': 'No apps configured.',
-        'form.add_title': 'Add New App',
-        'form.edit_prefix': 'Edit App: ',
-        'form.add_btn': 'Add App',
-        'form.update_btn': 'Update App',
-        'form.name': 'Name',
-        'form.watch_method': 'Watch Method',
-        'form.method_process': 'Process (PID existence check)',
-        'form.method_udp': 'UDP (heartbeat packet)',
-        'form.method_file': 'File (timestamp update)',
-        'form.method_http': 'HTTP (health check URL)',
-        'form.method_window': 'Window (title existence)',
-        'form.exe_path': 'Executable Path',
-        'form.timeout': 'Timeout (sec)',
-        'form.udp_port': 'UDP Port',
-        'form.udp_port_hint': 'Heartbeat packet to this port from the app',
-        'form.file_path': 'File Path',
-        'form.file_path_hint': 'App updates this file periodically; stale = timeout',
-        'form.http_url': 'Health Check URL',
-        'form.http_code': 'Expected Status Code',
-        'form.http_hint': 'GET request; matching status code = alive',
-        'form.window_title': 'Window Title (partial match)',
-        'form.window_hint': 'Checks if a window containing this text exists',
-        'form.process_hint': 'No extra settings needed. Monitors if PID is alive (cannot detect freezes).',
-        'form.advanced': 'Advanced (ID / Arguments / Start / Schedule)',
-        'form.id': 'ID',
-        'form.id_hint': 'Leave empty to auto-generate from the name.',
-        'form.args': 'Arguments (use "quotes" for paths with spaces)',
-        'form.args_hint': 'Example: "C:\\path with spaces\\file.toe" --flag value',
-        'form.autostart': 'Auto Start (Watchdog launches the app)',
-        'form.order': 'Start Order',
-        'form.order_hint': 'Lower = earlier. Same value = parallel.',
-        'form.delay': 'Start Delay (sec)',
-        'form.delay_hint': 'Wait this long before starting this app.',
-        'form.shell': 'Use shell open (for .toe files)',
-        'form.stopmode': 'Stop mode',
-        'form.stopmode_force': 'Force kill (immediate taskkill)',
-        'form.stopmode_graceful': 'Save then quit: keystroke (Ctrl+S)',
-        'form.stopmode_osc': 'Save then quit: OSC',
-        'form.osc_host': 'OSC Host',
-        'form.osc_port': 'OSC Port',
+        'sum.running': 'running',
+        'sum.stopped': 'stopped',
+        'sum.waiting': 'off-hours',
+        'sum.disabled': 'disabled',
+        'state.running': 'Running',
+        'state.starting': 'Starting',
+        'state.stopped': 'Stopped',
+        'state.waiting': 'Outside hours',
+        'state.disabled': 'Disabled',
+        'card.no_apps': 'No apps are being monitored yet.',
+        'card.target': 'Target',
+        'card.watch': 'Liveness check',
+        'card.stopmode': 'On stop',
+        'card.schedule': 'Operating hours',
+        'card.uptime': 'Uptime',
+        'card.pid': 'Process ID',
+        'card.heartbeat': 'Last response',
+        'card.restarts': 'Auto restarts',
+        'card.restarts_unit': '',
+        'card.always': '24/7',
+        'card.everyday': 'every day',
+        'card.watch_only': 'Watch only (never launches)',
+        'card.auto': 'Launched by Watchdog',
+        'card.warn_restarts': '%s consecutive auto restarts. Recovery may not be working — check the log.',
+        'card.next_start': 'next start %s',
+        'card.btn_stop': 'Stop (%s)',
+        'card.btn_stop_sub': 'also turns monitoring off',
+        'card.btn_disable': 'Turn monitoring off',
+        'card.btn_enable': 'Enable and start',
+        'card.btn_enable_watch': 'Turn monitoring on',
+        'card.busy_stop': 'Stopping...',
+        'card.busy_start': 'Starting...',
+        'stop.force': 'force kill',
+        'stop.graceful': 'save then quit',
+        'stop.osc': 'save via OSC then quit',
+        'watch.process': 'Process',
+        'watch.window': 'Window',
+        'watch.udp': 'UDP',
+        'watch.http': 'HTTP',
+        'watch.file': 'File',
+        'log.title': 'Recent log',
+        'log.pause': 'Pause auto-refresh',
+        'log.hint': 'Starts, stops and restarts show up here',
+        'log.empty': 'No log entries yet.',
+        'settings.title': 'Global settings',
+        'settings.sub': 'PC reboot / log folder / config backup',
+        'settings.reboot_legend': 'Scheduled PC reboot',
+        'settings.reboot_time': 'Reboot at',
+        'settings.reboot_time_hint': 'Empty = no reboot. All apps are stopped before the PC reboots.',
+        'settings.reboot_days': 'Reboot on',
+        'settings.log_legend': 'Logs',
+        'settings.log_dir': 'Log folder',
+        'settings.log_dir_hint': 'Relative to the exe, or an absolute path. One file per day.',
+        'settings.save': 'Save settings',
+        'settings.export': 'Back up config',
+        'settings.import': 'Restore from backup',
+        'settings.import_hint': 'Restoring replaces every setting and restarts the apps. A changed port needs a Watchdog restart.',
+        'settings.saved': 'Settings saved.',
+        'form.add_title': 'Add app',
+        'form.edit_title': 'Settings: %s',
+        'form.legend_basic': 'Basics',
+        'form.legend_watch': 'Liveness check',
+        'form.legend_run': 'Start and stop',
+        'form.legend_sched': 'Operating hours',
+        'form.legend_adv': 'Advanced (rarely needed)',
+        'form.name': 'App name',
+        'form.name_hint': 'Shown in this screen. Anything you like.',
+        'form.exe_path': 'File to launch',
+        'form.exe_hint': 'Not only .exe — documents like .mad (MadMapper) or .toe (TouchDesigner) work too.',
+        'form.exe_hint_shell': 'Set to open with its associated app (same as double-clicking).',
+        'form.watch_method': 'Method',
+        'form.method_process': 'Process is alive (most apps)',
+        'form.method_window': 'A window exists',
+        'form.method_udp': 'App sends UDP heartbeats',
+        'form.method_http': 'A URL responds',
+        'form.method_file': 'A file keeps being updated',
+        'form.note_process': 'Checks that the process is alive. Good enough for MadMapper and TouchDesigner, but it <strong>cannot detect a freeze</strong> (the process stays alive).',
+        'form.note_window': 'Checks for a window whose title contains your text. If the window disappears, the app is restarted.',
+        'form.note_udp': 'The app must send UDP packets periodically. Use it when the app can do that (custom apps, TouchDesigner).',
+        'form.note_http': 'Sends a periodic GET; a matching status code counts as alive.',
+        'form.note_file': 'Watches the timestamp of a file the app keeps writing. Stale = restart.',
+        'form.udp_port': 'UDP port to listen on',
+        'form.window_title': 'Window title (partial match)',
+        'form.http_url': 'URL to check',
+        'form.http_code': 'Expected status code',
+        'form.file_path': 'File to watch',
+        'form.timeout': 'Seconds without a response before restarting',
+        'form.timeout_note': 'After %ss with no response the process is killed and started again.',
+        'form.autostart': 'Watchdog launches this app',
+        'form.autostart_on': 'Turn off to only monitor an app that is already running.',
+        'form.autostart_off': 'Currently off: never launches, only finds and watches a running app.',
+        'form.stopmode': 'When stopping',
+        'form.stopmode_graceful': 'Save then quit (send Ctrl+S)',
+        'form.stopmode_force': 'Force kill without saving',
+        'form.stopmode_osc': 'Save then quit (via OSC)',
+        'form.note_graceful': 'Brings the window to the front, sends Ctrl+S, waits for the save, then quits. <strong>Verified to save on MadMapper 6.1.2.</strong> Can take up to 20 seconds.',
+        'form.note_force': 'Quits immediately. <strong>Nothing is saved.</strong> Fine when there is nothing to keep.',
+        'form.note_osc': 'Sends an OSC save command before quitting. <strong>Did not save on MadMapper</strong> — only use it if your app supports a save-over-OSC address.',
+        'form.osc_host': 'Host',
+        'form.osc_port': 'Port',
         'form.osc_save': 'Save address',
-        'form.osc_quit': 'Quit address (fill in once known)',
-        'form.osc_quit_hint': 'Blank = OSC save then kill by PID. Set the quit address to quit via OSC.',
-        'form.schedule': 'Schedule (optional)',
-        'form.schedule_hint': 'Leave start/stop time empty for always-on behavior.',
-        'form.sched_start': 'Start Time (HH:MM)',
-        'form.sched_stop': 'Stop Time (HH:MM)',
-        'form.active_days': 'Active Days (empty = every day)',
-        'cmd.section': 'Scheduled Commands (UDP / OSC / PJLINK)',
+        'form.osc_quit': 'Quit address (optional)',
+        'form.sched_always': 'Run 24/7',
+        'form.sched_window': 'Pick a time window',
+        'form.sched_start': 'Start at',
+        'form.sched_stop': 'Stop at',
+        'form.active_days': 'Active days',
+        'form.sched_note': 'Starts at %s and stops at %s (%s).',
+        'form.sched_note_overnight': 'Starts at %s and stops at %s the next day (%s). Overnight windows are supported.',
+        'form.args': 'Command line arguments',
+        'form.args_hint': 'Wrap paths containing spaces in "quotes".',
+        'form.shell': 'Open with its associated app (like double-clicking)',
+        'form.shell_hint': 'Enabled automatically for non-.exe files. MadMapper and TouchDesigner documents need it.',
+        'form.order': 'Start order',
+        'form.order_hint': 'Lower starts earlier.',
+        'form.delay': 'Delay before starting (sec)',
+        'form.id': 'ID',
+        'form.id_hint': 'Identifier inside the config file. Cannot be changed later.',
+        'preset.everyday': 'Every day',
+        'preset.weekday': 'Weekdays',
+        'preset.weekend': 'Weekend',
+        'cmd.section': 'Scheduled commands',
+        'cmd.section_sub': 'UDP / OSC / PJLINK (projector power, etc.)',
         'cmd.col_command': 'Command',
-        'cmd.col_type': 'Type',
         'cmd.col_target': 'Target',
         'cmd.col_payload': 'Payload',
-        'cmd.col_schedule': 'Schedule',
-        'cmd.col_enabled': 'Enabled',
-        'cmd.no_commands': 'No commands.',
-        'cmd.add_title': 'Add Command',
-        'cmd.edit_prefix': 'Edit Command: ',
-        'cmd.add_btn': 'Add Command',
-        'cmd.update_btn': 'Update Command',
-        'cmd.name': 'Name',
+        'cmd.col_schedule': 'When',
+        'cmd.no_commands': 'No commands yet.',
+        'cmd.add_title': '+ Add command',
+        'cmd.dlg_add': 'Add command',
+        'cmd.dlg_edit': 'Command: %s',
+        'cmd.name': 'Command name',
         'cmd.type': 'Type',
-        'cmd.host': 'Host (IP)',
+        'cmd.host': 'Target IP',
         'cmd.port': 'Port',
         'cmd.payload': 'Payload',
         'cmd.hex': 'Send as HEX (e.g. 01 0A FF)',
-        'cmd.osc_addr': 'OSC Address',
-        'cmd.osc_args': 'Arguments (space-separated; int/float/string auto-detected)',
-        'cmd.pj_cmd': 'PJLINK Command',
-        'cmd.pj_on': 'Power On (POWR 1)',
-        'cmd.pj_off': 'Power Off (POWR 0)',
-        'cmd.pj_pass': 'Password (blank = no auth)',
-        'cmd.time': 'Time (HH:MM; blank = manual only)',
-        'cmd.enabled': 'Enabled (scheduled firing)',
-        'cmd.days': 'Days (empty = every day)',
-        'cmd.test_fire': 'Test fire',
-        'dyn.enable': 'Enable',
-        'dyn.disable': 'Disable',
-        'dyn.edit': 'Edit',
-        'dyn.delete': 'Delete',
-        'dyn.test': 'Test',
-        'dyn.auto': 'Auto',
-        'dyn.watch_only': 'Watch only',
-        'dyn.always': 'Always',
-        'dyn.everyday': 'every day',
-        'dyn.manual_only': 'Manual only',
-        'dyn.timeout': 'timeout',
-        'dyn.sending': 'Sending ...',
-        'status.running': 'running',
-        'status.stopped': 'stopped',
-        'status.starting': 'starting',
-        'status.disabled': 'disabled',
-        'reboot.prefix': 'Reboot: ',
-        'reboot.everyday': '(every day)',
-        'msg.req_app': 'Name, Executable Path, Timeout are required.',
-        'msg.req_udp': 'UDP Port is required for UDP watch method.',
-        'msg.error_prefix': 'Error: ',
-        'msg.req_failed': 'Request failed: ',
-        'msg.del_app': 'Delete "%s" and kill its process?',
-        'msg.toggle_failed': 'Toggle failed',
-        'msg.delete_failed': 'Delete failed',
-        'msg.shutdown_confirm': 'Shut down Watchdog? All monitored processes will be terminated.',
-        'msg.shutdown_done': 'Watchdog has been shut down.',
-        'msg.req_cmd': 'Name and Host are required',
-        'msg.req_host': 'Please enter a host',
-        'msg.dialog_failed': 'Could not open the dialog',
+        'cmd.osc_addr': 'OSC address',
+        'cmd.osc_args': 'Arguments',
+        'cmd.osc_args_hint': 'Space separated; int / float / string detected automatically.',
+        'cmd.pj_cmd': 'PJLINK command',
+        'cmd.pj_on': 'Power on',
+        'cmd.pj_off': 'Power off',
+        'cmd.pj_pass': 'Password',
+        'cmd.legend_when': 'When to send',
+        'cmd.time': 'Send at',
+        'cmd.time_hint': 'Leave empty to only send manually with the test button.',
+        'cmd.days': 'Days',
+        'cmd.enabled': 'Send automatically at that time',
+        'cmd.test_fire': 'Test send',
+        'cmd.manual_only': 'manual only',
+        'cmd.auto_off': 'auto send off',
+        'cmd.sending': 'sending ...',
+        'reboot.prefix': 'PC reboot ',
+        'msg.req_name_exe': 'Name and file to launch are required.',
+        'msg.req_timeout': 'The timeout must be 1 second or more.',
+        'msg.req_udp': 'A UDP port is required for UDP checks.',
+        'msg.req_window': 'Enter a window title.',
+        'msg.req_http': 'Enter the URL to check.',
+        'msg.req_file': 'Choose the file to watch.',
+        'msg.req_sched': 'Enter both a start and a stop time.',
+        'msg.req_cmd': 'Command name and target IP are required.',
+        'msg.req_host': 'Enter the target IP.',
+        'msg.saved': 'Saved.',
+        'msg.deleted': 'Deleted.',
+        'msg.stopped': 'Stopped "%s".',
+        'msg.started': 'Enabled "%s".',
+        'msg.del_app': 'Delete "%s"? The monitored process will also be stopped.',
         'msg.del_cmd': 'Delete command "%s"?',
-        'msg.import_confirm': 'Importing replaces all current settings and restarts monitored apps. Continue?',
-        'msg.import_bad_json': 'Could not parse as JSON: ',
-        'msg.import_ok': 'Config imported (%s app(s)).',
-        'msg.import_restart': 'web_port changed — restart Watchdog for it to take effect.',
-        'ph.id': 'auto-generated from name',
+        'msg.confirm_force': 'Force kill "%s" without saving. Continue?',
+        'msg.shutdown_confirm': 'Shut down Watchdog? Monitored apps will be stopped too.',
+        'msg.shutdown_done': 'Watchdog has stopped.',
+        'msg.import_confirm': 'Restoring replaces every current setting and restarts monitored apps. Continue?',
+        'msg.import_bad_json': 'Could not parse the JSON: ',
+        'msg.import_ok': 'Config restored (%s app(s)).',
+        'msg.import_restart': 'The port changed, so Watchdog must be restarted for it to apply.',
+        'msg.failed': 'Failed: ',
+        'msg.dialog_failed': 'Could not open the file dialog.',
+        'ph.id': 'generated from the name',
         'ph.cmd_payload': 'text to send, or HEX bytes',
+        'ph.cmd_port': '4352 for PJLINK',
         'ph.pj_pass': 'blank if no auth',
-        'ph.osc_quit': '(blank = save then kill by PID)'
+        'ph.osc_quit': 'blank = quit by process after saving'
       }
     };
 
     let lang = localStorage.getItem('wd_lang') || 'ja';
-
-    function t(key) {
-      let s = (I18N[lang] && I18N[lang][key]) || I18N.en[key] || key;
-      for (let i = 1; i < arguments.length; i++) s = s.replace('%s', arguments[i]);
+    function t(key, ...args) {
+      let s = (I18N[lang] && I18N[lang][key]) || (I18N.ja[key]) || key;
+      args.forEach(a => { s = s.replace('%s', a); });
       return s;
     }
 
-    function applyI18n() {
-      document.documentElement.lang = lang;
-      document.querySelectorAll('[data-i18n]').forEach(el => { el.textContent = t(el.getAttribute('data-i18n')); });
-      document.querySelectorAll('[data-i18n-ph]').forEach(el => { el.placeholder = t(el.getAttribute('data-i18n-ph')); });
-      const lt = document.getElementById('lang-toggle');
-      if (lt) lt.textContent = lang === 'ja' ? 'EN' : '日本語';
-      // Re-render dynamic content in the new language.
-      if (window._lastApps) renderTable(window._lastApps);
-      renderCommands(cmdCache);
-      if (!editingId) $('#form-title').textContent = t('form.add_title');
-      if (!editingId) $('#btn-save').textContent = t('form.add_btn');
-      if (!editingCmdId) $('#cmd-form-title').textContent = t('cmd.add_title');
-      if (!editingCmdId) $('#cmd-save').textContent = t('cmd.add_btn');
-      $('#btn-cancel').textContent = lang === 'ja' ? 'キャンセル' : 'Cancel';
-      $('#cmd-cancel').textContent = lang === 'ja' ? 'キャンセル' : 'Cancel';
-      updateClock();
-      if (window._lastSettings) renderSettings(window._lastSettings, true);
-    }
+    const DAYS = ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'];
+    const DAY_LABELS = {
+      ja: ['月','火','水','木','金','土','日'],
+      en: ['Mon','Tue','Wed','Thu','Fri','Sat','Sun']
+    };
 
-    function setLang(l) { lang = l; localStorage.setItem('wd_lang', l); applyI18n(); }
-    function toggleLang() { setLang(lang === 'ja' ? 'en' : 'ja'); }
-
-    // ---------------------------------------------------------------------
-    let editingId = null;
-    let editingCmdId = null;
-    let cmdCache = [];
+    // =====================================================================
+    // state + helpers
+    // =====================================================================
+    let apps = [], commands = [], settings = null;
+    let editingAppId = null, editingCmdId = null;
+    let busy = 0;              // suppress re-render while an operation is running
     let settingsLoaded = false;
-    const $ = (sel) => document.querySelector(sel);
-    const cmdTypeColor = {udp:'method-udp', osc:'method-http', pjlink:'method-window'};
-    const methodMap = {udp:'UDP', process:'Process', file:'File', http:'HTTP', window:'Window'};
-    const methodColorMap = {udp:'method-udp', process:'method-process', file:'method-file', http:'method-http', window:'method-window'};
 
-    function parseArgs(str) {
-      const s = (str || '').trim();
-      if (!s) return [];
-      const args = [];
-      let current = '';
-      let inQuote = false;
-      for (let i = 0; i < s.length; i++) {
-        const c = s[i];
-        if (c === '"') {
-          inQuote = !inQuote;
-        } else if (c === ' ' && !inQuote) {
-          if (current) { args.push(current); current = ''; }
-        } else {
-          current += c;
-        }
-      }
-      if (current) args.push(current);
-      return args;
-    }
-
-    function formatArgs(args) {
-      if (!Array.isArray(args) || args.length === 0) return '';
-      return args.map(a => a.includes(' ') ? '"' + a + '"' : a).join(' ');
-    }
-
-    // Ask the server to open a native file/folder dialog and fill the target input.
-    async function pickPath(type, targetSel, onPicked) {
-      try {
-        const res = await fetch('/api/pick?type=' + encodeURIComponent(type));
-        if (!res.ok) { alert(t('msg.dialog_failed')); return; }
-        const data = await res.json();
-        if (!data.path) return; // cancelled
-        $(targetSel).value = data.path;
-        if (typeof onPicked === 'function') onPicked(data.path);
-      } catch (e) {
-        alert(t('msg.req_failed') + e);
-      }
-    }
-
-    // After picking an executable: auto-fill the name and detect non-exe targets.
-    function onExePicked(path) {
-      const nameEl = $('#f-name');
-      if (!nameEl.value.trim()) {
-        const base = path.replace(/\\/g, '/').split('/').pop() || '';
-        nameEl.value = base.replace(/\.[^.]+$/, '');
-      }
-      if (!/\.exe$/i.test(path)) {
-        $('#f-shell').checked = true;
-      }
-    }
-
-    // Derive an id from a display name: lowercase, non-alphanumerics -> '-'.
-    function slugify(name) {
-      return (name || '').toLowerCase()
-        .replace(/[^a-z0-9]+/g, '-')
-        .replace(/^-+|-+$/g, '');
-    }
-
-    function updateClock() {
-      const now = new Date();
-      const el = $('#clock');
-      if (el) el.textContent = now.toLocaleString(lang === 'ja' ? 'ja-JP' : 'en-US');
-    }
-    setInterval(updateClock, 1000);
-
-    function onMethodChange() {
-      const m = $('#f-method').value;
-      document.querySelectorAll('.watch-fields .field-row').forEach(el => el.classList.remove('active'));
-      const target = document.getElementById('wf-' + m);
-      if (target) target.classList.add('active');
-    }
-
-    function onStopModeChange() {
-      $('#osc-fields').style.display = $('#f-stopmode').value === 'osc' ? '' : 'none';
-    }
-
-    async function fetchStatus() {
-      try {
-        const res = await fetch('/api/status');
-        const data = await res.json();
-        window._lastApps = data.apps || [];
-        window._lastSettings = data.settings;
-        renderTable(window._lastApps);
-        renderSettings(data.settings);
-        cmdCache = data.commands || [];
-        renderCommands(cmdCache);
-      } catch (e) {
-        console.error('Status fetch error', e);
-      }
-    }
-
-    function formatSchedule(sched) {
-      if (!sched || !sched.start_time || !sched.stop_time) return '<span style="color:#5a7080">' + t('dyn.always') + '</span>';
-      let s = sched.start_time + ' - ' + sched.stop_time;
-      if (sched.days && sched.days.length > 0) {
-        const short = sched.days.map(d => d.substring(0,3));
-        s += '<br><span style="font-size:11px;color:#6b8da6">' + short.join(', ') + '</span>';
-      }
-      return s;
-    }
-
-    function watchDetail(a) {
-      const wc = a.WatchConfig || {};
-      switch (a.WatchMethod) {
-        case 'udp': return ':' + (wc.udp_port || '?');
-        case 'file': return wc.file_path || '-';
-        case 'http': return wc.url || '-';
-        case 'window': return '"' + (wc.window_title || '') + '"';
-        case 'process': return 'PID check';
-        default: return '-';
-      }
-    }
-
-    function renderTable(apps) {
-      const tbody = $('#status-body');
-      if (!apps || apps.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="7" class="empty-msg">' + t('table.no_apps') + '</td></tr>';
-        return;
-      }
-      tbody.innerHTML = apps.map(a => {
-        const disabledClass = a.Enabled ? '' : ' row-disabled';
-        const toggleLabel = a.Enabled ? t('dyn.disable') : t('dyn.enable');
-        const toggleClass = a.Enabled ? 'btn-toggle-on' : 'btn-toggle-off';
-        const mLabel = methodMap[a.WatchMethod] || a.WatchMethod;
-        const mColor = methodColorMap[a.WatchMethod] || 'method-process';
-        const detail = watchDetail(a);
-        let startInfo = a.AutoStart ? t('dyn.auto') : t('dyn.watch_only');
-        if (a.AutoStart && a.StartOrder > 0) startInfo += ' #' + a.StartOrder;
-        if (a.AutoStart && a.StartDelaySec > 0) startInfo += ' +' + a.StartDelaySec + 's';
-        const statusText = t('status.' + a.Status);
-        return `
-        <tr class="${disabledClass}">
-          <td>
-            ${esc(a.Name)}
-            <span class="cell-sub"><code>${esc(a.ID)}</code></span>
-          </td>
-          <td>
-            <span class="method-badge ${mColor}">${mLabel}</span>
-            <span class="cell-sub">${esc(detail)} &middot; ${t('dyn.timeout')} ${a.TimeoutSec}s</span>
-          </td>
-          <td style="font-size:12px;">
-            ${startInfo}
-            <span class="cell-sub">${formatSchedule(a.Schedule)}</span>
-          </td>
-          <td><span class="badge badge-${a.Status}">${statusText}</span></td>
-          <td class="pid">${a.PID || '-'}</td>
-          <td style="font-size:12px;">${a.LastHeartbeat || '-'}</td>
-          <td class="actions">
-            <button class="${toggleClass}" onclick="toggleApp('${esc(a.ID)}')">${toggleLabel}</button>
-            <button onclick="editApp('${esc(a.ID)}')">${t('dyn.edit')}</button>
-            <button class="btn-delete" onclick="deleteApp('${esc(a.ID)}')">${t('dyn.delete')}</button>
-          </td>
-        </tr>`;
-      }).join('');
-    }
-
-    function renderSettings(settings, force) {
-      if (!settings) return;
-      const active = document.activeElement;
-      if (!force && active && active.id && (active.id.startsWith('f-reboot') || active.id === 'f-log-dir')) return;
-
-      if (!settingsLoaded) {
-        $('#f-reboot-time').value = settings.reboot_time || '';
-        $('#f-log-dir').value = settings.log_dir || 'logs';
-        document.querySelectorAll('.reboot-day').forEach(cb => {
-          cb.checked = settings.reboot_days ? settings.reboot_days.includes(cb.value) : false;
-        });
-        settingsLoaded = true;
-      }
-
-      const hdr = $('#header-reboot');
-      if (settings.reboot_time) {
-        let info = t('reboot.prefix') + settings.reboot_time;
-        if (settings.reboot_days && settings.reboot_days.length > 0) {
-          info += ' (' + settings.reboot_days.map(d => d.substring(0,3)).join(', ') + ')';
-        } else {
-          info += ' ' + t('reboot.everyday');
-        }
-        hdr.textContent = info;
-        hdr.style.display = '';
-      } else {
-        hdr.style.display = 'none';
-      }
-    }
+    const $ = sel => document.querySelector(sel);
+    const $$ = sel => Array.from(document.querySelectorAll(sel));
 
     function esc(s) {
       if (s == null) return '';
@@ -1050,37 +1089,484 @@
       return d.innerHTML;
     }
 
-    function buildPayload() {
-      const method = $('#f-method').value;
-      const watchConfig = {};
-      switch (method) {
-        case 'udp':
-          watchConfig.udp_port = parseInt($('#f-udp-port').value) || 0;
-          break;
-        case 'file':
-          watchConfig.file_path = $('#f-file-path').value.trim();
-          break;
-        case 'http':
-          watchConfig.url = $('#f-http-url').value.trim();
-          watchConfig.expect_code = parseInt($('#f-http-code').value) || 200;
-          break;
-        case 'window':
-          watchConfig.window_title = $('#f-window-title').value.trim();
-          break;
+    function toast(msg, kind) {
+      const el = document.createElement('div');
+      el.className = 'toast ' + (kind || '');
+      el.textContent = msg;
+      $('#toasts').appendChild(el);
+      setTimeout(() => el.remove(), 4500);
+    }
+
+    // Run an async action with a spinner on the clicked button.
+    async function withBusy(btn, label, fn) {
+      const original = btn ? btn.innerHTML : null;
+      if (btn) {
+        btn.disabled = true;
+        btn.innerHTML = '<span class="spinner"></span>' + esc(label || '');
+      }
+      busy++;
+      try {
+        return await fn();
+      } finally {
+        busy--;
+        if (btn) { btn.disabled = false; btn.innerHTML = original; }
+      }
+    }
+
+    function slugify(name) {
+      return (name || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+    }
+
+    function parseArgs(str) {
+      const s = (str || '').trim();
+      if (!s) return [];
+      const out = []; let cur = '', q = false;
+      for (const c of s) {
+        if (c === '"') q = !q;
+        else if (c === ' ' && !q) { if (cur) { out.push(cur); cur = ''; } }
+        else cur += c;
+      }
+      if (cur) out.push(cur);
+      return out;
+    }
+    function formatArgs(args) {
+      if (!Array.isArray(args) || !args.length) return '';
+      return args.map(a => a.includes(' ') ? '"' + a + '"' : a).join(' ');
+    }
+
+    function baseName(p) {
+      return (p || '').replace(/[\\/]+$/, '').split(/[\\/]/).pop() || '';
+    }
+
+    // "2026-07-29 16:47:03" -> Date
+    function parseStamp(s) {
+      if (!s) return null;
+      const d = new Date(s.replace(' ', 'T'));
+      return isNaN(d.getTime()) ? null : d;
+    }
+
+    function fmtDuration(from) {
+      if (!from) return '-';
+      let sec = Math.floor((Date.now() - from.getTime()) / 1000);
+      if (sec < 0) sec = 0;
+      const d = Math.floor(sec / 86400), h = Math.floor(sec % 86400 / 3600),
+            m = Math.floor(sec % 3600 / 60), s = sec % 60;
+      if (lang === 'ja') {
+        if (d) return d + '日' + h + '時間';
+        if (h) return h + '時間' + m + '分';
+        if (m) return m + '分' + s + '秒';
+        return s + '秒';
+      }
+      if (d) return d + 'd ' + h + 'h';
+      if (h) return h + 'h ' + m + 'm';
+      if (m) return m + 'm ' + s + 's';
+      return s + 's';
+    }
+
+    function dayLabels(days) {
+      if (!days || !days.length) return t('card.everyday');
+      const idx = DAYS.map((d, i) => days.includes(d) ? i : -1).filter(i => i >= 0);
+      return idx.map(i => DAY_LABELS[lang][i]).join(lang === 'ja' ? '・' : ', ');
+    }
+
+    function hhmmToMin(s) {
+      const p = (s || '').split(':');
+      if (p.length < 2) return null;
+      const h = parseInt(p[0]), m = parseInt(p[1]);
+      if (isNaN(h) || isNaN(m)) return null;
+      return h * 60 + m;
+    }
+
+    // Mirrors the server's schedule logic, including overnight windows.
+    function inSchedule(sched, now) {
+      if (!sched || !sched.start_time || !sched.stop_time) return true;
+      now = now || new Date();
+      if (sched.days && sched.days.length && !sched.days.includes(DAYS[(now.getDay() + 6) % 7])) return false;
+      const start = hhmmToMin(sched.start_time), stop = hhmmToMin(sched.stop_time);
+      if (start == null || stop == null) return true;
+      const cur = now.getHours() * 60 + now.getMinutes();
+      return start <= stop ? (cur >= start && cur < stop) : (cur >= start || cur < stop);
+    }
+
+    // =====================================================================
+    // rendering: cards
+    // =====================================================================
+    const STOP_LABEL = { force: 'stop.force', graceful: 'stop.graceful', osc: 'stop.osc' };
+
+    function appState(a) {
+      if (!a.Enabled) return 'disabled';
+      if (a.Status === 'running') return 'running';
+      if (a.Status === 'starting') return 'starting';
+      if (a.Schedule && a.Schedule.start_time && a.Schedule.stop_time && !inSchedule(a.Schedule)) return 'waiting';
+      return 'stopped';
+    }
+
+    function watchSummary(a) {
+      const wc = a.WatchConfig || {};
+      const name = t('watch.' + a.WatchMethod) || a.WatchMethod;
+      let detail = '';
+      switch (a.WatchMethod) {
+        case 'udp': detail = ':' + (wc.udp_port || '?'); break;
+        case 'file': detail = baseName(wc.file_path); break;
+        case 'http': detail = wc.url || ''; break;
+        case 'window': detail = '"' + (wc.window_title || '') + '"'; break;
+      }
+      return detail ? name + ' ' + detail : name;
+    }
+
+    function scheduleSummary(a) {
+      const s = a.Schedule;
+      if (!s || !s.start_time || !s.stop_time) return t('card.always');
+      return s.start_time + ' - ' + s.stop_time + '  (' + dayLabels(s.days) + ')';
+    }
+
+    function renderSummary() {
+      const counts = { running: 0, stopped: 0, waiting: 0, disabled: 0 };
+      apps.forEach(a => {
+        const st = appState(a);
+        if (st === 'running' || st === 'starting') counts.running++;
+        else if (st === 'stopped') counts.stopped++;
+        else if (st === 'waiting') counts.waiting++;
+        else counts.disabled++;
+      });
+      const pills = [
+        ['running', 'sum.running', counts.running, true],
+        ['bad', 'sum.stopped', counts.stopped, counts.stopped > 0],
+        ['waiting', 'sum.waiting', counts.waiting, counts.waiting > 0],
+        ['disabled', 'sum.disabled', counts.disabled, counts.disabled > 0]
+      ];
+      $('#summary').innerHTML = pills.filter(p => p[3]).map(
+        ([dot, key, n]) => `<span class="sum"><span class="dot dot-${dot}"></span>${t(key)} <b>${n}</b></span>`
+      ).join('');
+    }
+
+    function renderCards() {
+      const host = $('#cards');
+      if (!apps.length) {
+        host.innerHTML = `<div class="empty"><p>${t('card.no_apps')}</p>
+          <button class="btn btn-primary" onclick="openAppDialog(null)">${t('ui.add_app')}</button></div>`;
+        return;
       }
 
-      const schedStart = $('#f-sched-start').value.trim();
-      const schedStop = $('#f-sched-stop').value.trim();
-      const schedDays = Array.from(document.querySelectorAll('.sched-day:checked')).map(cb => cb.value);
+      host.innerHTML = apps.map(a => {
+        const st = appState(a);
+        const stopKey = STOP_LABEL[a.StopMode || 'force'] || 'stop.force';
+        const running = st === 'running' || st === 'starting';
 
-      const payload = {
-        id: $('#f-id').value.trim() || slugify($('#f-name').value),
+        let primary;
+        if (!a.Enabled) {
+          primary = `<button class="btn btn-start" onclick="toggleApp('${esc(a.ID)}', this)">${
+            a.AutoStart ? t('card.btn_enable') : t('card.btn_enable_watch')}</button>`;
+        } else if (running) {
+          primary = `<button class="btn btn-stop" onclick="toggleApp('${esc(a.ID)}', this)">${
+            t('card.btn_stop', t(stopKey))}</button>
+            <span class="hint-inline">${t('card.btn_stop_sub')}</span>`;
+        } else {
+          primary = `<button class="btn btn-ghost" onclick="toggleApp('${esc(a.ID)}', this)">${t('card.btn_disable')}</button>`;
+        }
+
+        const facts = [];
+        if (running && a.StartedAt) facts.push([t('card.uptime'), fmtDuration(parseStamp(a.StartedAt))]);
+        if (a.PID) facts.push([t('card.pid'), a.PID, 'mono']);
+        if (running && a.LastHeartbeat) facts.push([t('card.heartbeat'), a.LastHeartbeat.split(' ')[1] || a.LastHeartbeat]);
+        facts.push([t('card.restarts'), a.Restarts + t('card.restarts_unit')]);
+        facts.push([t('card.stopmode'), t(stopKey)]);
+        facts.push([t('card.schedule'), scheduleSummary(a)]);
+
+        const waitingNote = st === 'waiting' && a.Schedule
+          ? `<span class="hint-inline">${t('card.next_start', a.Schedule.start_time)}</span>` : '';
+
+        return `
+        <div class="card state-${st}">
+          <div class="card-main">
+            <div class="card-top">
+              <span class="card-name">${esc(a.Name || a.ID)}</span>
+              <span class="pill pill-${st}">${t('state.' + st)}</span>
+              ${waitingNote}
+              ${a.Name && a.Name !== a.ID ? `<span class="card-id" style="margin-left:auto">${esc(a.ID)}</span>` : ''}
+            </div>
+            <div class="card-target" title="${esc(a.ExePath)}">
+              ${esc(baseName(a.ExePath))}
+              &nbsp;·&nbsp; ${esc(watchSummary(a))}
+              &nbsp;·&nbsp; ${a.AutoStart ? t('card.auto') : t('card.watch_only')}
+            </div>
+            ${a.Restarts > 0 ? `<div class="notice">${t('card.warn_restarts', a.Restarts)}</div>` : ''}
+            <div class="facts">
+              ${facts.map(([k, v, cls]) => `<div class="fact"><span class="k">${k}</span><span class="v ${cls || ''}">${esc(String(v))}</span></div>`).join('')}
+            </div>
+          </div>
+          <div class="card-actions">
+            ${primary}
+            <div class="spacer"></div>
+            <button class="btn btn-ghost btn-sm" onclick="openAppDialog('${esc(a.ID)}')">${t('common.edit')}</button>
+            <button class="btn btn-danger-ghost btn-sm" onclick="deleteApp('${esc(a.ID)}', this)">${t('common.delete')}</button>
+          </div>
+        </div>`;
+      }).join('');
+    }
+
+    // =====================================================================
+    // rendering: commands
+    // =====================================================================
+    function renderCommands() {
+      const tb = $('#cmd-body');
+      if (!commands.length) {
+        tb.innerHTML = `<tr><td colspan="5" style="color:var(--dim);padding:20px 10px">${t('cmd.no_commands')}</td></tr>`;
+        return;
+      }
+      tb.innerHTML = commands.map(c => {
+        let payload = '';
+        if (c.type === 'udp') payload = (c.payload_hex ? '[hex] ' : '') + (c.payload || '');
+        else if (c.type === 'osc') payload = (c.osc_addr || '') + ' ' + (c.osc_args || '');
+        else if (c.type === 'pjlink') payload = c.pj_command || '';
+        const when = c.time
+          ? esc(c.time) + `<span class="sub">${c.enabled ? dayLabels(c.days) : t('cmd.auto_off')}</span>`
+          : `<span style="color:var(--dimmer)">${t('cmd.manual_only')}</span>`;
+        const port = c.port || (c.type === 'pjlink' ? 4352 : '');
+        return `<tr class="${c.enabled ? '' : 'off'}">
+          <td>${esc(c.name)}<span class="sub">${esc(c.id)}</span></td>
+          <td><span class="tag tag-${esc(c.type)}">${esc((c.type || '').toUpperCase())}</span>
+              <span class="sub">${esc(c.host)}:${esc(String(port))}</span></td>
+          <td class="mono" style="font-size:12px">${esc(payload)}</td>
+          <td style="font-size:12px">${when}</td>
+          <td class="acts">
+            <button class="btn btn-ghost btn-sm" onclick="testCommand('${esc(c.id)}', this)">${t('common.test')}</button>
+            <button class="btn btn-ghost btn-sm" onclick="openCmdDialog('${esc(c.id)}')">${t('common.edit')}</button>
+            <button class="btn btn-danger-ghost btn-sm" onclick="deleteCommand('${esc(c.id)}', this)">${t('common.delete')}</button>
+          </td>
+        </tr>`;
+      }).join('');
+    }
+
+    // =====================================================================
+    // rendering: settings + log
+    // =====================================================================
+    function renderSettings(force) {
+      if (!settings) return;
+      const active = document.activeElement;
+      const editing = active && active.id && (active.id.startsWith('f-reboot') || active.id === 'f-log-dir');
+      if (!settingsLoaded || force) {
+        if (!editing) {
+          $('#f-reboot-time').value = settings.reboot_time || '';
+          $('#f-log-dir').value = settings.log_dir || 'logs';
+          setChips('#reboot-days', settings.reboot_days || []);
+        }
+        settingsLoaded = true;
+      }
+      const hdr = $('#header-reboot');
+      if (settings.reboot_time) {
+        hdr.textContent = t('reboot.prefix') + settings.reboot_time + ' (' + dayLabels(settings.reboot_days) + ')';
+        hdr.style.display = '';
+      } else {
+        hdr.style.display = 'none';
+      }
+    }
+
+    function classifyLog(line) {
+      if (/could not|WARNING|timeout|Restarting|failed|Killing/i.test(line)) {
+        return /failed|could not|WARNING/i.test(line) ? 'bad' : 'warn';
+      }
+      return '';
+    }
+
+    async function fetchLog() {
+      const panel = $('#log-panel');
+      if (!panel.open || $('#log-pause').checked) return;
+      try {
+        const res = await fetch('/api/logs?lines=200');
+        const data = await res.json();
+        $('#log-file').textContent = data.file || '';
+        const box = $('#log-box');
+        const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
+        const lines = data.lines || [];
+        box.innerHTML = lines.length
+          ? lines.map(l => {
+              const m = l.match(/^(\d{4}\/\d{2}\/\d{2} \d{2}:\d{2}:\d{2})\s?(.*)$/);
+              const cls = classifyLog(l);
+              return m
+                ? `<div class="log-line ${cls}"><span class="ts">${esc(m[1].split(' ')[1])}</span> ${esc(m[2])}</div>`
+                : `<div class="log-line ${cls}">${esc(l)}</div>`;
+            }).join('')
+          : `<div class="log-line">${t('log.empty')}</div>`;
+        if (atBottom) box.scrollTop = box.scrollHeight;
+      } catch (e) { /* keep the last content on a transient error */ }
+    }
+
+    // =====================================================================
+    // data fetch
+    // =====================================================================
+    async function fetchStatus() {
+      try {
+        const res = await fetch('/api/status');
+        const data = await res.json();
+        apps = data.apps || [];
+        commands = data.commands || [];
+        settings = data.settings;
+        if (busy === 0) {
+          renderSummary();
+          renderCards();
+          renderCommands();
+        }
+        renderSettings();
+      } catch (e) { /* transient */ }
+    }
+
+    function updateClock() {
+      $('#clock').textContent = new Date().toLocaleString(lang === 'ja' ? 'ja-JP' : 'en-US');
+    }
+
+    // =====================================================================
+    // day chips
+    // =====================================================================
+    function buildChips(containerSel, presetSel) {
+      const host = $(containerSel);
+      host.innerHTML = DAYS.map((d, i) =>
+        `<button type="button" class="chip" data-day="${d}" onclick="this.classList.toggle('on')">${DAY_LABELS[lang][i]}</button>`
+      ).join('');
+      if (presetSel) {
+        $(presetSel).innerHTML =
+          `<button type="button" onclick="setChips('${containerSel}', [])">${t('preset.everyday')}</button>
+           <button type="button" onclick="setChips('${containerSel}', ['Monday','Tuesday','Wednesday','Thursday','Friday'])">${t('preset.weekday')}</button>
+           <button type="button" onclick="setChips('${containerSel}', ['Saturday','Sunday'])">${t('preset.weekend')}</button>`;
+      }
+    }
+    function setChips(sel, days) {
+      $$(sel + ' .chip').forEach(c => c.classList.toggle('on', (days || []).includes(c.dataset.day)));
+      if (sel === '#sched-days') updateSchedNote();
+    }
+    function getChips(sel) {
+      return $$(sel + ' .chip.on').map(c => c.dataset.day);
+    }
+
+    // =====================================================================
+    // app dialog
+    // =====================================================================
+    function onMethodChange() {
+      const m = $('#f-method').value;
+      ['udp','window','http','file'].forEach(x => {
+        const el = $('#wf-' + x);
+        if (el) el.style.display = (x === m) ? '' : 'none';
+      });
+      $('#method-note').innerHTML = t('form.note_' + m);
+    }
+
+    function onStopModeChange() {
+      const v = $('#f-stopmode').value;
+      $('#stopmode-note').innerHTML = t('form.note_' + v);
+      $('#osc-fields').style.display = v === 'osc' ? '' : 'none';
+    }
+
+    function updateTimeoutNote() {
+      $('#timeout-note').textContent = t('form.timeout_note', $('#f-timeout').value || '0');
+    }
+
+    function updateAutoStartNote() {
+      const on = $('#f-autostart').checked;
+      $('#autostart-note').textContent = on ? t('form.autostart_on') : t('form.autostart_off');
+    }
+
+    function onSchedModeChange() {
+      const mode = (document.querySelector('input[name="sched-mode"]:checked') || {}).value || 'always';
+      $('#sched-fields').style.display = mode === 'window' ? '' : 'none';
+      updateSchedNote();
+    }
+
+    function updateSchedNote() {
+      const a = $('#f-sched-start').value, b = $('#f-sched-stop').value;
+      const note = $('#sched-note');
+      if (!a || !b) { note.textContent = ''; return; }
+      const days = dayLabels(getChips('#sched-days'));
+      const overnight = hhmmToMin(a) > hhmmToMin(b);
+      note.textContent = t(overnight ? 'form.sched_note_overnight' : 'form.sched_note', a, b, days);
+    }
+
+    function onExePicked(path) {
+      if (!$('#f-name').value.trim()) {
+        $('#f-name').value = baseName(path).replace(/\.[^.]+$/, '');
+      }
+      if (!/\.exe$/i.test(path)) {
+        $('#f-shell').checked = true;
+        $('#exe-hint').textContent = t('form.exe_hint_shell');
+      } else {
+        $('#exe-hint').textContent = t('form.exe_hint');
+      }
+    }
+
+    async function pickPath(type, targetSel, onPicked) {
+      try {
+        const res = await fetch('/api/pick?type=' + encodeURIComponent(type));
+        if (!res.ok) { toast(t('msg.dialog_failed'), 'err'); return; }
+        const data = await res.json();
+        if (!data.path) return;
+        $(targetSel).value = data.path;
+        if (onPicked) onPicked(data.path);
+      } catch (e) { toast(t('msg.failed') + e, 'err'); }
+    }
+
+    function openAppDialog(id) {
+      const a = id ? apps.find(x => x.ID === id) : null;
+      editingAppId = a ? a.ID : null;
+      $('#app-dlg-err').textContent = '';
+
+      $('#f-name').value = a ? (a.Name || '') : '';
+      $('#f-exe').value = a ? a.ExePath : '';
+      $('#exe-hint').textContent = t(a && a.UseShellOpen ? 'form.exe_hint_shell' : 'form.exe_hint');
+      $('#f-method').value = a ? (a.WatchMethod || 'process') : 'process';
+      $('#f-timeout').value = a ? a.TimeoutSec : 30;
+      const wc = (a && a.WatchConfig) || {};
+      $('#f-udp-port').value = wc.udp_port || '';
+      $('#f-window-title').value = wc.window_title || '';
+      $('#f-http-url').value = wc.url || '';
+      $('#f-http-code').value = wc.expect_code || 200;
+      $('#f-file-path').value = wc.file_path || '';
+      $('#f-autostart').checked = a ? a.AutoStart : true;
+      $('#f-stopmode').value = a ? (a.StopMode || 'force') : 'graceful';
+      $('#f-osc-host').value = (a && a.OSCHost) || '';
+      $('#f-osc-port').value = (a && a.OSCPort) || '';
+      $('#f-osc-save').value = (a && a.OSCSaveAddr) || '';
+      $('#f-osc-quit').value = (a && a.OSCQuitAddr) || '';
+      $('#f-args').value = a ? formatArgs(a.Args) : '';
+      $('#f-shell').checked = a ? a.UseShellOpen : false;
+      $('#f-order').value = a ? a.StartOrder : 0;
+      $('#f-delay').value = a ? a.StartDelaySec : 0;
+      $('#f-id').value = a ? a.ID : '';
+      $('#f-id').disabled = !!a;
+
+      const sched = a ? a.Schedule : null;
+      const hasSched = !!(sched && sched.start_time && sched.stop_time);
+      $$('input[name="sched-mode"]').forEach(r => { r.checked = (r.value === (hasSched ? 'window' : 'always')); });
+      $('#f-sched-start').value = hasSched ? sched.start_time : '';
+      $('#f-sched-stop').value = hasSched ? sched.stop_time : '';
+      setChips('#sched-days', hasSched ? (sched.days || []) : []);
+
+      $('#app-dlg-title').textContent = a ? t('form.edit_title', a.Name || a.ID) : t('form.add_title');
+      onMethodChange(); onStopModeChange(); updateTimeoutNote(); updateAutoStartNote(); onSchedModeChange();
+      $('#app-dialog').showModal();
+      // Focus a field rather than the close button, which showModal picks by default.
+      $('#f-name').focus();
+    }
+
+    function closeAppDialog() { $('#app-dialog').close(); editingAppId = null; }
+
+    function buildAppPayload() {
+      const method = $('#f-method').value;
+      const wc = {};
+      if (method === 'udp') wc.udp_port = parseInt($('#f-udp-port').value) || 0;
+      if (method === 'window') wc.window_title = $('#f-window-title').value.trim();
+      if (method === 'http') { wc.url = $('#f-http-url').value.trim(); wc.expect_code = parseInt($('#f-http-code').value) || 200; }
+      if (method === 'file') wc.file_path = $('#f-file-path').value.trim();
+
+      const mode = (document.querySelector('input[name="sched-mode"]:checked') || {}).value;
+      const start = $('#f-sched-start').value, stop = $('#f-sched-stop').value;
+
+      const p = {
+        id: (editingAppId || $('#f-id').value.trim() || slugify($('#f-name').value)),
         name: $('#f-name').value.trim(),
         exe_path: $('#f-exe').value.trim(),
         args: parseArgs($('#f-args').value),
         use_shell_open: $('#f-shell').checked,
         watch_method: method,
-        watch_config: watchConfig,
+        watch_config: wc,
         timeout_sec: parseInt($('#f-timeout').value) || 0,
         auto_start: $('#f-autostart').checked,
         start_order: parseInt($('#f-order').value) || 0,
@@ -1090,209 +1576,177 @@
         osc_port: parseInt($('#f-osc-port').value) || 0,
         osc_save_addr: $('#f-osc-save').value.trim(),
         osc_quit_addr: $('#f-osc-quit').value.trim(),
+        schedule: (mode === 'window' && start && stop) ? {start_time: start, stop_time: stop, days: getChips('#sched-days')} : null
       };
-
-      if (schedStart && schedStop) {
-        payload.schedule = { start_time: schedStart, stop_time: schedStop, days: schedDays };
-      } else {
-        payload.schedule = null;
-      }
-      return payload;
+      return {payload: p, schedIncomplete: mode === 'window' && !(start && stop)};
     }
 
-    async function saveApp() {
-      const payload = buildPayload();
-      if (!payload.id || !payload.exe_path || !payload.timeout_sec) {
-        alert(t('msg.req_app'));
-        return;
-      }
-      if (payload.watch_method === 'udp' && !payload.watch_config.udp_port) {
-        alert(t('msg.req_udp'));
-        return;
-      }
-      try {
-        let res;
-        if (editingId) {
-          res = await fetch('/api/app/' + encodeURIComponent(editingId), {method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)});
-        } else {
-          res = await fetch('/api/app', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)});
-        }
-        if (!res.ok) { alert(t('msg.error_prefix') + await res.text()); return; }
-        cancelEdit();
-        fetchStatus();
-      } catch (e) {
-        alert(t('msg.req_failed') + e);
-      }
+    function appFormError(p, schedIncomplete) {
+      if (!p.name || !p.exe_path) return t('msg.req_name_exe');
+      if (!p.timeout_sec || p.timeout_sec < 1) return t('msg.req_timeout');
+      if (p.watch_method === 'udp' && !p.watch_config.udp_port) return t('msg.req_udp');
+      if (p.watch_method === 'window' && !p.watch_config.window_title) return t('msg.req_window');
+      if (p.watch_method === 'http' && !p.watch_config.url) return t('msg.req_http');
+      if (p.watch_method === 'file' && !p.watch_config.file_path) return t('msg.req_file');
+      if (schedIncomplete) return t('msg.req_sched');
+      return null;
     }
 
-    async function editApp(id) {
-      const res = await fetch('/api/status');
-      const data = await res.json();
-      const app = (data.apps || []).find(a => a.ID === id);
-      if (!app) return;
+    async function saveApp(btn) {
+      const {payload, schedIncomplete} = buildAppPayload();
+      const err = appFormError(payload, schedIncomplete);
+      $('#app-dlg-err').textContent = err || '';
+      if (err) return;
 
-      editingId = id;
-      $('#f-id').value = app.ID;
-      $('#f-id').disabled = true;
-      $('#f-name').value = app.Name;
-      $('#f-exe').value = app.ExePath;
-      $('#f-args').value = formatArgs(app.Args);
-      $('#f-shell').checked = app.UseShellOpen;
-      $('#f-method').value = app.WatchMethod || 'process';
-      $('#f-timeout').value = app.TimeoutSec;
-
-      const wc = app.WatchConfig || {};
-      $('#f-udp-port').value = wc.udp_port || '';
-      $('#f-file-path').value = wc.file_path || '';
-      $('#f-http-url').value = wc.url || '';
-      $('#f-http-code').value = wc.expect_code || 200;
-      $('#f-window-title').value = wc.window_title || '';
-      $('#f-autostart').checked = app.AutoStart;
-      $('#f-order').value = app.StartOrder || 0;
-      $('#f-delay').value = app.StartDelaySec || 0;
-      $('#f-stopmode').value = app.StopMode || 'force';
-      $('#f-osc-host').value = app.OSCHost || '';
-      $('#f-osc-port').value = app.OSCPort || '';
-      $('#f-osc-save').value = app.OSCSaveAddr || '';
-      $('#f-osc-quit').value = app.OSCQuitAddr || '';
-      onStopModeChange();
-
-      const sched = app.Schedule;
-      $('#f-sched-start').value = sched ? sched.start_time || '' : '';
-      $('#f-sched-stop').value = sched ? sched.stop_time || '' : '';
-      document.querySelectorAll('.sched-day').forEach(cb => {
-        cb.checked = sched && sched.days ? sched.days.includes(cb.value) : false;
+      await withBusy(btn, t('common.save'), async () => {
+        try {
+          const url = editingAppId ? '/api/app/' + encodeURIComponent(editingAppId) : '/api/app';
+          const res = await fetch(url, {
+            method: editingAppId ? 'PUT' : 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(payload)
+          });
+          if (!res.ok) { $('#app-dlg-err').textContent = await res.text(); return; }
+          closeAppDialog();
+          toast(t('msg.saved'), 'ok');
+          await fetchStatus();
+        } catch (e) { $('#app-dlg-err').textContent = String(e); }
       });
-
-      onMethodChange();
-      const adv = document.querySelector('details.advanced');
-      if (adv) adv.open = true;
-      $('#form-title').textContent = t('form.edit_prefix') + app.ID;
-      $('#btn-save').textContent = t('form.update_btn');
-      $('#btn-cancel').style.display = '';
-      window.scrollTo({top: document.body.scrollHeight, behavior: 'smooth'});
     }
 
-    function cancelEdit() {
-      editingId = null;
-      $('#f-id').value = ''; $('#f-id').disabled = false;
-      $('#f-name').value = '';
-      $('#f-exe').value = '';
-      $('#f-args').value = '';
-      $('#f-shell').checked = false;
-      $('#f-method').value = 'process';
-      $('#f-timeout').value = '30';
-      $('#f-udp-port').value = '';
-      $('#f-file-path').value = '';
-      $('#f-http-url').value = '';
-      $('#f-http-code').value = '200';
-      $('#f-window-title').value = '';
-      $('#f-autostart').checked = true;
-      $('#f-order').value = '0';
-      $('#f-delay').value = '0';
-      $('#f-stopmode').value = 'force';
-      $('#f-osc-host').value = '';
-      $('#f-osc-port').value = '';
-      $('#f-osc-save').value = '';
-      $('#f-osc-quit').value = '';
-      onStopModeChange();
-      $('#f-sched-start').value = '';
-      $('#f-sched-stop').value = '';
-      document.querySelectorAll('.sched-day').forEach(cb => cb.checked = false);
-      onMethodChange();
-      const adv = document.querySelector('details.advanced');
-      if (adv) adv.open = false;
-      $('#form-title').textContent = t('form.add_title');
-      $('#btn-save').textContent = t('form.add_btn');
-      $('#btn-cancel').style.display = 'none';
-    }
-
-    async function saveSettings() {
-      const rebootTime = $('#f-reboot-time').value.trim();
-      const rebootDays = Array.from(document.querySelectorAll('.reboot-day:checked')).map(cb => cb.value);
-      const logDir = $('#f-log-dir').value.trim();
-      try {
-        const res = await fetch('/api/settings', {
-          method: 'PUT',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({log_dir: logDir, reboot_time: rebootTime, reboot_days: rebootDays}),
-        });
-        if (!res.ok) { alert(t('msg.error_prefix') + await res.text()); return; }
-        settingsLoaded = false;
-        fetchStatus();
-      } catch (e) {
-        alert(t('msg.req_failed') + e);
+    async function toggleApp(id, btn) {
+      const a = apps.find(x => x.ID === id);
+      if (!a) return;
+      const running = a.Enabled && (a.Status === 'running' || a.Status === 'starting');
+      if (running && (a.StopMode || 'force') === 'force') {
+        if (!confirm(t('msg.confirm_force', a.Name || id))) return;
       }
+      const label = a.Enabled ? t('card.busy_stop') : t('card.busy_start');
+      await withBusy(btn, label, async () => {
+        try {
+          const res = await fetch('/api/app/' + encodeURIComponent(id) + '/toggle', {method: 'POST'});
+          if (!res.ok) { toast(t('msg.failed') + await res.text(), 'err'); return; }
+          const out = await res.json();
+          toast(out.enabled ? t('msg.started', a.Name || id) : t('msg.stopped', a.Name || id), 'ok');
+        } catch (e) { toast(t('msg.failed') + e, 'err'); }
+      });
+      await fetchStatus();
+      fetchLog();
+    }
+
+    async function deleteApp(id, btn) {
+      const a = apps.find(x => x.ID === id);
+      if (!confirm(t('msg.del_app', (a && a.Name) || id))) return;
+      await withBusy(btn, t('common.delete'), async () => {
+        try {
+          const res = await fetch('/api/app/' + encodeURIComponent(id), {method: 'DELETE'});
+          if (!res.ok) { toast(t('msg.failed') + await res.text(), 'err'); return; }
+          toast(t('msg.deleted'), 'ok');
+        } catch (e) { toast(t('msg.failed') + e, 'err'); }
+      });
+      await fetchStatus();
+    }
+
+    // =====================================================================
+    // settings actions
+    // =====================================================================
+    async function saveSettings(btn) {
+      await withBusy(btn, t('settings.save'), async () => {
+        try {
+          const res = await fetch('/api/settings', {
+            method: 'PUT',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+              log_dir: $('#f-log-dir').value.trim(),
+              reboot_time: $('#f-reboot-time').value.trim(),
+              reboot_days: getChips('#reboot-days')
+            })
+          });
+          if (!res.ok) { toast(t('msg.failed') + await res.text(), 'err'); return; }
+          toast(t('settings.saved'), 'ok');
+          settingsLoaded = false;
+        } catch (e) { toast(t('msg.failed') + e, 'err'); }
+      });
+      await fetchStatus();
     }
 
     function exportConfig() {
-      // Trigger a browser download of the current config from the server.
       const a = document.createElement('a');
       a.href = '/api/config/export';
       a.download = '';
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
+      document.body.appendChild(a); a.click(); a.remove();
     }
 
     async function importConfig(input) {
       const file = input.files && input.files[0];
-      input.value = ''; // allow re-importing the same file later
+      input.value = '';
       if (!file) return;
       if (!confirm(t('msg.import_confirm'))) return;
       try {
         const text = await file.text();
         let parsed;
         try { parsed = JSON.parse(text); }
-        catch (e) { alert(t('msg.import_bad_json') + e); return; }
+        catch (e) { toast(t('msg.import_bad_json') + e, 'err'); return; }
         const res = await fetch('/api/config/import', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify(parsed),
+          method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(parsed)
         });
-        if (!res.ok) { alert(t('msg.error_prefix') + await res.text()); return; }
+        if (!res.ok) { toast(t('msg.failed') + await res.text(), 'err'); return; }
         const out = await res.json();
-        alert(t('msg.import_ok', out.apps) + (out.restart_required ? '\n' + t('msg.import_restart') : ''));
+        toast(t('msg.import_ok', out.apps) + (out.restart_required ? ' ' + t('msg.import_restart') : ''), 'ok');
         settingsLoaded = false;
-        fetchStatus();
-      } catch (e) {
-        alert(t('msg.req_failed') + e);
-      }
-    }
-
-    async function deleteApp(id) {
-      if (!confirm(t('msg.del_app', id))) return;
-      try {
-        const res = await fetch('/api/app/' + encodeURIComponent(id), {method: 'DELETE'});
-        if (!res.ok) alert(t('msg.delete_failed'));
-        fetchStatus();
-      } catch (e) { alert(t('msg.req_failed') + e); }
-    }
-
-    async function toggleApp(id) {
-      try {
-        const res = await fetch('/api/app/' + encodeURIComponent(id) + '/toggle', {method: 'POST'});
-        if (!res.ok) { alert(t('msg.toggle_failed')); return; }
-        fetchStatus();
-      } catch (e) { alert(t('msg.req_failed') + e); }
+        await fetchStatus();
+      } catch (e) { toast(t('msg.failed') + e, 'err'); }
     }
 
     async function shutdownWatchdog() {
       if (!confirm(t('msg.shutdown_confirm'))) return;
       try {
         await fetch('/api/shutdown', {method: 'POST'});
-        document.body.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100vh;color:#8899aa;font-size:20px;">' + t('msg.shutdown_done') + '</div>';
-      } catch (e) { alert(t('msg.req_failed') + e); }
+        document.body.innerHTML =
+          '<div style="display:flex;align-items:center;justify-content:center;height:100vh;color:#8299ab;font-size:18px">'
+          + t('msg.shutdown_done') + '</div>';
+      } catch (e) { toast(t('msg.failed') + e, 'err'); }
     }
 
-    // ----- Scheduled commands -----
+    // =====================================================================
+    // command dialog
+    // =====================================================================
     function onCmdTypeChange() {
       const ty = $('#c-type').value;
       ['udp','osc','pjlink'].forEach(x => {
-        const el = document.getElementById('cf-' + x);
+        const el = $('#cf-' + x);
         if (el) el.style.display = (x === ty) ? '' : 'none';
       });
     }
+    function setPj(v) { $('#c-pj-cmd').value = v; }
+
+    function openCmdDialog(id) {
+      const c = id ? commands.find(x => x.id === id) : null;
+      editingCmdId = c ? c.id : null;
+      $('#cmd-dlg-err').textContent = '';
+      $('#cmd-dlg-result').textContent = '';
+
+      $('#c-name').value = c ? (c.name || '') : '';
+      $('#c-type').value = c ? (c.type || 'udp') : 'udp';
+      $('#c-host').value = c ? (c.host || '') : '';
+      $('#c-port').value = c ? (c.port || '') : '';
+      $('#c-payload').value = c ? (c.payload || '') : '';
+      $('#c-hex').checked = !!(c && c.payload_hex);
+      $('#c-osc-addr').value = c ? (c.osc_addr || '') : '';
+      $('#c-osc-args').value = c ? (c.osc_args || '') : '';
+      $('#c-pj-cmd').value = c ? (c.pj_command || '') : '';
+      $('#c-pj-pass').value = c ? (c.pj_password || '') : '';
+      $('#c-time').value = c ? (c.time || '') : '';
+      $('#c-enabled').checked = c ? !!c.enabled : true;
+      setChips('#cmd-days', c ? (c.days || []) : []);
+
+      $('#cmd-dlg-title').textContent = c ? t('cmd.dlg_edit', c.name || c.id) : t('cmd.dlg_add');
+      onCmdTypeChange();
+      $('#cmd-dialog').showModal();
+      $('#c-name').focus();
+    }
+
+    function closeCmdDialog() { $('#cmd-dialog').close(); editingCmdId = null; }
 
     function buildCmdPayload() {
       const type = $('#c-type').value;
@@ -1303,8 +1757,8 @@
         host: $('#c-host').value.trim(),
         port: parseInt($('#c-port').value) || (type === 'pjlink' ? 4352 : 0),
         time: $('#c-time').value.trim(),
-        days: Array.from(document.querySelectorAll('.cmd-day:checked')).map(c => c.value),
-        enabled: $('#c-enabled').checked,
+        days: getChips('#cmd-days'),
+        enabled: $('#c-enabled').checked
       };
       if (type === 'udp') { p.payload = $('#c-payload').value; p.payload_hex = $('#c-hex').checked; }
       else if (type === 'osc') { p.osc_addr = $('#c-osc-addr').value.trim(); p.osc_args = $('#c-osc-args').value.trim(); }
@@ -1312,144 +1766,115 @@
       return p;
     }
 
-    async function saveCommand() {
+    async function saveCommand(btn) {
       const p = buildCmdPayload();
-      if (!p.name || !p.host) { alert(t('msg.req_cmd')); return; }
-      try {
-        let res;
-        if (editingCmdId) {
-          res = await fetch('/api/command/' + encodeURIComponent(editingCmdId), {method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify(p)});
-        } else {
-          res = await fetch('/api/command', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(p)});
+      if (!p.name || !p.host) { $('#cmd-dlg-err').textContent = t('msg.req_cmd'); return; }
+      $('#cmd-dlg-err').textContent = '';
+      await withBusy(btn, t('common.save'), async () => {
+        try {
+          const url = editingCmdId ? '/api/command/' + encodeURIComponent(editingCmdId) : '/api/command';
+          const res = await fetch(url, {
+            method: editingCmdId ? 'PUT' : 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(p)
+          });
+          if (!res.ok) { $('#cmd-dlg-err').textContent = await res.text(); return; }
+          closeCmdDialog();
+          toast(t('msg.saved'), 'ok');
+          await fetchStatus();
+        } catch (e) { $('#cmd-dlg-err').textContent = String(e); }
+      });
+    }
+
+    async function fireAndShow(cmdObj, target, btn) {
+      const el = $(target);
+      el.style.color = 'var(--dim)';
+      el.textContent = t('cmd.sending');
+      await withBusy(btn, t('common.test'), async () => {
+        try {
+          const res = await fetch('/api/command/fire', {
+            method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(cmdObj)
+          });
+          const d = await res.json();
+          el.style.color = d.ok ? 'var(--ok)' : 'var(--bad)';
+          el.textContent = (d.ok ? '✓ ' : '✗ ') + (d.ok ? (d.result || 'sent') : (d.error || 'failed'));
+        } catch (e) {
+          el.style.color = 'var(--bad)';
+          el.textContent = '✗ ' + e;
         }
-        if (!res.ok) { alert(t('msg.error_prefix') + await res.text()); return; }
-        cancelCmdEdit();
-        fetchStatus();
-      } catch (e) { alert(t('msg.req_failed') + e); }
+      });
     }
 
-    async function fireAndShow(cmdObj) {
-      const el = $('#cmd-result');
-      el.style.color = '#8899aa'; el.textContent = t('dyn.sending');
-      try {
-        const res = await fetch('/api/command/fire', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(cmdObj)});
-        const d = await res.json();
-        if (d.ok) { el.style.color = '#34d399'; el.textContent = '✓ ' + (d.result || 'sent'); }
-        else { el.style.color = '#f87171'; el.textContent = '✗ ' + (d.error || 'failed'); }
-      } catch (e) { el.style.color = '#f87171'; el.textContent = '✗ ' + e; }
-    }
-
-    function fireCommandForm() {
+    function fireCommandForm(btn) {
       const p = buildCmdPayload();
-      if (!p.host) { alert(t('msg.req_host')); return; }
-      fireAndShow(p);
+      if (!p.host) { $('#cmd-dlg-err').textContent = t('msg.req_host'); return; }
+      $('#cmd-dlg-err').textContent = '';
+      fireAndShow(p, '#cmd-dlg-result', btn);
     }
 
-    function testCommand(id) {
-      const c = cmdCache.find(x => x.id === id);
-      if (c) fireAndShow(c);
+    function testCommand(id, btn) {
+      const c = commands.find(x => x.id === id);
+      if (c) fireAndShow(c, '#cmd-result', btn);
     }
 
-    async function toggleCommand(id) {
-      const c = cmdCache.find(x => x.id === id);
-      if (!c) return;
-      const updated = Object.assign({}, c, {enabled: !c.enabled});
-      try {
-        const res = await fetch('/api/command/' + encodeURIComponent(id), {method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify(updated)});
-        if (!res.ok) { alert(t('msg.toggle_failed')); return; }
-        fetchStatus();
-      } catch (e) { alert(t('msg.req_failed') + e); }
+    async function deleteCommand(id, btn) {
+      const c = commands.find(x => x.id === id);
+      if (!confirm(t('msg.del_cmd', (c && c.name) || id))) return;
+      await withBusy(btn, t('common.delete'), async () => {
+        try {
+          const res = await fetch('/api/command/' + encodeURIComponent(id), {method: 'DELETE'});
+          if (!res.ok) { toast(t('msg.failed') + await res.text(), 'err'); return; }
+          toast(t('msg.deleted'), 'ok');
+        } catch (e) { toast(t('msg.failed') + e, 'err'); }
+      });
+      await fetchStatus();
     }
 
-    function editCommand(id) {
-      const c = cmdCache.find(x => x.id === id);
-      if (!c) return;
-      editingCmdId = id;
-      $('#c-name').value = c.name || '';
-      $('#c-type').value = c.type || 'udp';
-      $('#c-host').value = c.host || '';
-      $('#c-port').value = c.port || '';
-      $('#c-payload').value = c.payload || '';
-      $('#c-hex').checked = !!c.payload_hex;
-      $('#c-osc-addr').value = c.osc_addr || '';
-      $('#c-osc-args').value = c.osc_args || '';
-      $('#c-pj-cmd').value = c.pj_command || '';
-      $('#c-pj-pass').value = c.pj_password || '';
-      $('#c-time').value = c.time || '';
-      $('#c-enabled').checked = !!c.enabled;
-      document.querySelectorAll('.cmd-day').forEach(cb => cb.checked = c.days ? c.days.includes(cb.value) : false);
-      onCmdTypeChange();
-      $('#cmd-form-title').textContent = t('cmd.edit_prefix') + c.id;
-      $('#cmd-save').textContent = t('cmd.update_btn');
-      $('#cmd-cancel').style.display = '';
-      window.scrollTo({top: document.body.scrollHeight, behavior:'smooth'});
+    // =====================================================================
+    // i18n application + init
+    // =====================================================================
+    function applyI18n() {
+      document.documentElement.lang = lang;
+      $$('[data-i18n]').forEach(el => { el.textContent = t(el.getAttribute('data-i18n')); });
+      $$('[data-i18n-ph]').forEach(el => { el.placeholder = t(el.getAttribute('data-i18n-ph')); });
+      $('#lang-toggle').textContent = lang === 'ja' ? 'EN' : '日本語';
+
+      // Chips carry language-specific labels, so rebuild them (keeping selection).
+      const keep = {
+        '#sched-days': getChips('#sched-days'),
+        '#cmd-days': getChips('#cmd-days'),
+        '#reboot-days': getChips('#reboot-days')
+      };
+      buildChips('#sched-days', '#sched-presets');
+      buildChips('#cmd-days', '#cmd-presets');
+      buildChips('#reboot-days', '#reboot-presets');
+      Object.entries(keep).forEach(([sel, days]) => setChips(sel, days));
+
+      onMethodChange(); onStopModeChange(); updateTimeoutNote(); updateAutoStartNote(); onSchedModeChange();
+      renderSummary(); renderCards(); renderCommands(); renderSettings(true);
+      updateClock();
     }
 
-    function cancelCmdEdit() {
-      editingCmdId = null;
-      $('#c-name').value = ''; $('#c-type').value = 'udp'; $('#c-host').value = ''; $('#c-port').value = '';
-      $('#c-payload').value = ''; $('#c-hex').checked = false;
-      $('#c-osc-addr').value = ''; $('#c-osc-args').value = '';
-      $('#c-pj-cmd').value = ''; $('#c-pj-pass').value = '';
-      $('#c-time').value = ''; $('#c-enabled').checked = true;
-      document.querySelectorAll('.cmd-day').forEach(cb => cb.checked = false);
-      onCmdTypeChange();
-      $('#cmd-form-title').textContent = t('cmd.add_title');
-      $('#cmd-save').textContent = t('cmd.add_btn');
-      $('#cmd-cancel').style.display = 'none';
+    function toggleLang() {
+      lang = lang === 'ja' ? 'en' : 'ja';
+      localStorage.setItem('wd_lang', lang);
+      applyI18n();
     }
 
-    async function deleteCommand(id) {
-      if (!confirm(t('msg.del_cmd', id))) return;
-      try {
-        const res = await fetch('/api/command/' + encodeURIComponent(id), {method:'DELETE'});
-        if (!res.ok) { alert(t('msg.delete_failed')); return; }
-        fetchStatus();
-      } catch (e) { alert(t('msg.req_failed') + e); }
-    }
+    ['#f-sched-start', '#f-sched-stop'].forEach(sel => {
+      document.addEventListener('input', e => { if (e.target.matches(sel)) updateSchedNote(); });
+    });
+    $('#log-panel').addEventListener('toggle', () => { if ($('#log-panel').open) fetchLog(); });
 
-    function renderCommands(cmds) {
-      const tb = $('#cmd-body');
-      if (!cmds || cmds.length === 0) {
-        tb.innerHTML = '<tr><td colspan="7" class="empty-msg">' + t('cmd.no_commands') + '</td></tr>';
-        return;
-      }
-      tb.innerHTML = cmds.map(c => {
-        const color = cmdTypeColor[c.type] || 'method-process';
-        let payload = '';
-        if (c.type === 'udp') payload = (c.payload_hex ? '[hex] ' : '') + (c.payload || '');
-        else if (c.type === 'osc') payload = (c.osc_addr || '') + ' ' + (c.osc_args || '');
-        else if (c.type === 'pjlink') payload = c.pj_command || '';
-        const sched = c.time
-          ? (esc(c.time) + (c.days && c.days.length ? ('<span class="cell-sub">' + c.days.map(d=>d.substring(0,3)).join(', ') + '</span>') : ('<span class="cell-sub">' + t('dyn.everyday') + '</span>')))
-          : '<span style="color:#5a7080">' + t('dyn.manual_only') + '</span>';
-        const toggleLabel = c.enabled ? t('dyn.disable') : t('dyn.enable');
-        const toggleClass = c.enabled ? 'btn-toggle-on' : 'btn-toggle-off';
-        const rowcls = c.enabled ? '' : ' row-disabled';
-        const port = c.port || (c.type === 'pjlink' ? 4352 : '');
-        return `<tr class="${rowcls}">
-          <td>${esc(c.name)}<span class="cell-sub"><code>${esc(c.id)}</code></span></td>
-          <td><span class="method-badge ${color}">${esc((c.type||'').toUpperCase())}</span></td>
-          <td style="font-size:12px">${esc(c.host)}:${esc(String(port))}</td>
-          <td style="font-size:12px">${esc(payload)}</td>
-          <td style="font-size:12px">${sched}</td>
-          <td><button class="actions ${toggleClass}" onclick="toggleCommand('${esc(c.id)}')">${toggleLabel}</button></td>
-          <td class="actions">
-            <button onclick="testCommand('${esc(c.id)}')">${t('dyn.test')}</button>
-            <button onclick="editCommand('${esc(c.id)}')">${t('dyn.edit')}</button>
-            <button class="btn-delete" onclick="deleteCommand('${esc(c.id)}')">${t('dyn.delete')}</button>
-          </td>
-        </tr>`;
-      }).join('');
-    }
-
-    // Init
-    onMethodChange();
-    onStopModeChange();
-    onCmdTypeChange();
+    buildChips('#sched-days', '#sched-presets');
+    buildChips('#cmd-days', '#cmd-presets');
+    buildChips('#reboot-days', '#reboot-presets');
     applyI18n();
     fetchStatus();
+    fetchLog();
+    setInterval(updateClock, 1000);
     setInterval(fetchStatus, 2000);
+    setInterval(fetchLog, 3000);
   </script>
 </body>
 </html>
