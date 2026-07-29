@@ -121,6 +121,7 @@ var (
 	procGetConsoleWindow   = kernel32.NewProc("GetConsoleWindow")
 	procGetCurrentThreadId = kernel32.NewProc("GetCurrentThreadId")
 	procGetProcessId       = kernel32.NewProc("GetProcessId")
+	procCreateMutexW       = kernel32.NewProc("CreateMutexW")
 
 	user32                       = syscall.NewLazyDLL("user32.dll")
 	procShowWindow               = user32.NewProc("ShowWindow")
@@ -403,8 +404,11 @@ type CommandConfig struct {
 }
 
 type Config struct {
-	WebPort     int             `json:"web_port"`
-	ShowConsole bool            `json:"show_console"`
+	WebPort     int  `json:"web_port"`
+	ShowConsole bool `json:"show_console"`
+	// DisableTray removes the system tray icon. Off by default: the tray is the
+	// only visible sign that Watchdog is running at all.
+	DisableTray bool            `json:"disable_tray,omitempty"`
 	LogDir      string          `json:"log_dir"`
 	RebootTime  string          `json:"reboot_time,omitempty"`
 	RebootDays  []string        `json:"reboot_days,omitempty"`
@@ -450,14 +454,21 @@ type WatchedApp struct {
 // ---------------------------------------------------------------------------
 
 type Watchdog struct {
-	configPath string
-	config     Config
-	apps       map[string]*WatchedApp
-	mu         sync.RWMutex
-	templates  *template.Template
-	httpServer *http.Server
-	logWriter  *dateRotatingWriter
-	shutdownCh chan struct{}
+	configPath   string
+	config       Config
+	apps         map[string]*WatchedApp
+	mu           sync.RWMutex
+	templates    *template.Template
+	httpServer   *http.Server
+	logWriter    *dateRotatingWriter
+	shutdownCh   chan struct{}
+	shutdownOnce sync.Once
+}
+
+// requestShutdown starts an orderly shutdown. Safe to call more than once and
+// from anywhere (Web UI, tray, scheduled reboot).
+func (w *Watchdog) requestShutdown() {
+	w.shutdownOnce.Do(func() { close(w.shutdownCh) })
 }
 
 func NewWatchdog(configPath string) (*Watchdog, error) {
@@ -576,6 +587,68 @@ func shellOpenDocument(path string, args []string) (int, error) {
 	pid, _, _ := procGetProcessId.Call(info.hProcess)
 	syscall.CloseHandle(syscall.Handle(info.hProcess))
 	return int(pid), nil
+}
+
+// openURL opens a URL with the user's default handler (used for the Web UI).
+func openURL(target string) error {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+
+	procCoInitializeEx.Call(0, coinitApartment)
+	defer procCoUninitialize.Call()
+
+	filePtr, err := syscall.UTF16PtrFromString(target)
+	if err != nil {
+		return err
+	}
+	info := shellExecuteInfo{
+		fMask:  seeMaskNoAsync,
+		lpFile: filePtr,
+		nShow:  swShowNormal,
+	}
+	info.cbSize = uint32(unsafe.Sizeof(info))
+	if ret, _, callErr := procShellExecuteEx.Call(uintptr(unsafe.Pointer(&info))); ret == 0 {
+		return fmt.Errorf("ShellExecuteEx %q: %v", target, callErr)
+	}
+	return nil
+}
+
+// acquireSingleInstance takes a named mutex derived from the config path. Two
+// instances watching the same config would fight over the same apps and the same
+// port, which autostart makes easy to do by accident (shortcut + logon entry).
+// The returned bool is false when another instance already holds it.
+func acquireSingleInstance(configPath string) (syscall.Handle, bool) {
+	name := "Local\\watchdog-" + strings.Map(func(r rune) rune {
+		if r == '\\' || r == '/' || r == ':' {
+			return '_'
+		}
+		return r
+	}, strings.ToLower(configPath))
+
+	namePtr, err := syscall.UTF16PtrFromString(name)
+	if err != nil {
+		return 0, true
+	}
+	h, _, callErr := procCreateMutexW.Call(0, 0, uintptr(unsafe.Pointer(namePtr)))
+	if h == 0 {
+		return 0, true // cannot guard; better to run than to refuse
+	}
+	if errno, ok := callErr.(syscall.Errno); ok && errno == 183 { // ERROR_ALREADY_EXISTS
+		return syscall.Handle(h), false
+	}
+	return syscall.Handle(h), true
+}
+
+// waitForProcessExit blocks until pid is gone or the timeout expires. Used when
+// a restarted instance has to let its predecessor release the port first.
+func waitForProcessExit(pid int, timeout time.Duration) {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if !isProcessAlive(pid) {
+			return
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
 }
 
 // launchApp starts an app and returns the PID assigned to it, or 0 when the
@@ -1771,6 +1844,85 @@ func (w *Watchdog) stopApp(id string) {
 	}
 }
 
+// setAppEnabled turns an app's monitoring on or off, persisting the flag and
+// then starting or stopping the app (honoring its stop_mode). This is the single
+// place that behaviour lives: the Web UI toggle and the tray menu both call it.
+func (w *Watchdog) setAppEnabled(id string, enable bool) (bool, error) {
+	w.mu.Lock()
+	idx := -1
+	for i, a := range w.config.Apps {
+		if a.ID == id {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		w.mu.Unlock()
+		return false, fmt.Errorf("app %q not found", id)
+	}
+	if w.config.Apps[idx].Enabled == enable {
+		w.mu.Unlock()
+		return enable, nil
+	}
+	w.config.Apps[idx].Enabled = enable
+	cfg := w.config.Apps[idx]
+	w.saveConfig()
+	w.mu.Unlock()
+
+	if !enable {
+		w.stopApp(id)
+		log.Printf("[%s] Disabled", id)
+		return false, nil
+	}
+	if err := w.addAndStart(cfg); err != nil {
+		log.Printf("[%s] Enable failed: %v", id, err)
+		return true, err
+	}
+	log.Printf("[%s] Enabled", id)
+	return true, nil
+}
+
+// startAppNow launches an app that is registered but not running — typically one
+// waiting for its schedule window. It leaves the enabled flag alone; a disabled
+// app is enabled instead, which starts it.
+func (w *Watchdog) startAppNow(id string) error {
+	w.mu.RLock()
+	wa, registered := w.apps[id]
+	w.mu.RUnlock()
+
+	if !registered {
+		_, err := w.setAppEnabled(id, true)
+		return err
+	}
+
+	wa.mu.Lock()
+	status := wa.Status
+	wa.mu.Unlock()
+	if status == StatusRunning || status == StatusStarting {
+		return nil
+	}
+	log.Printf("[%s] Manual start", id)
+	return w.startApp(wa)
+}
+
+// restartAppNow stops an app (saving first if its stop_mode says so) and starts
+// it again.
+func (w *Watchdog) restartAppNow(id string) error {
+	w.mu.RLock()
+	_, registered := w.apps[id]
+	w.mu.RUnlock()
+
+	if registered {
+		log.Printf("[%s] Manual restart", id)
+		if _, err := w.setAppEnabled(id, false); err != nil {
+			return err
+		}
+		time.Sleep(1 * time.Second)
+	}
+	_, err := w.setAppEnabled(id, true)
+	return err
+}
+
 func (w *Watchdog) startAll() {
 	// Collect enabled apps and sort by start_order.
 	enabled := make([]AppConfig, 0)
@@ -2119,13 +2271,25 @@ func (w *Watchdog) handleIndex(rw http.ResponseWriter, r *http.Request) {
 	w.templates.Execute(rw, data)
 }
 
+// settingsView is everything the Web UI shows under "global settings",
+// including the Windows autostart state, which lives in the registry.
+func (w *Watchdog) settingsView() map[string]interface{} {
+	autoStart, registered := autoStartState()
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return map[string]interface{}{
+		"log_dir":           w.config.LogDir,
+		"reboot_time":       w.config.RebootTime,
+		"reboot_days":       w.config.RebootDays,
+		"web_port":          w.config.WebPort,
+		"tray":              !w.config.DisableTray,
+		"autostart":         autoStart,
+		"autostart_command": registered,
+	}
+}
+
 func (w *Watchdog) handleAPIStatus(rw http.ResponseWriter, r *http.Request) {
 	w.mu.RLock()
-	settings := map[string]interface{}{
-		"log_dir":     w.config.LogDir,
-		"reboot_time": w.config.RebootTime,
-		"reboot_days": w.config.RebootDays,
-	}
 	cmds := make([]CommandConfig, len(w.config.Commands))
 	copy(cmds, w.config.Commands)
 	w.mu.RUnlock()
@@ -2133,7 +2297,7 @@ func (w *Watchdog) handleAPIStatus(rw http.ResponseWriter, r *http.Request) {
 	rw.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(rw).Encode(map[string]interface{}{
 		"apps":     w.getStatusViews(),
-		"settings": settings,
+		"settings": w.settingsView(),
 		"commands": cmds,
 	})
 }
@@ -2251,37 +2415,24 @@ func (w *Watchdog) handleToggleApp(rw http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.mu.Lock()
-	idx := -1
-	for i, a := range w.config.Apps {
+	w.mu.RLock()
+	wasEnabled, found := false, false
+	for _, a := range w.config.Apps {
 		if a.ID == id {
-			idx = i
+			wasEnabled, found = a.Enabled, true
 			break
 		}
 	}
-	if idx < 0 {
-		w.mu.Unlock()
+	w.mu.RUnlock()
+	if !found {
 		http.Error(rw, "not found", http.StatusNotFound)
 		return
 	}
 
-	wasEnabled := w.config.Apps[idx].Enabled
-	w.config.Apps[idx].Enabled = !wasEnabled
-	nowEnabled := w.config.Apps[idx].Enabled
-	cfg := w.config.Apps[idx]
-	w.saveConfig()
-	w.mu.Unlock()
-
-	if wasEnabled && !nowEnabled {
-		w.stopApp(id)
-		log.Printf("[%s] Disabled", id)
-	} else if !wasEnabled && nowEnabled {
-		if err := w.addAndStart(cfg); err != nil {
-			log.Printf("[%s] Enable failed: %v", id, err)
-			http.Error(rw, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		log.Printf("[%s] Enabled", id)
+	nowEnabled, err := w.setAppEnabled(id, !wasEnabled)
+	if err != nil {
+		http.Error(rw, err.Error(), http.StatusInternalServerError)
+		return
 	}
 
 	rw.Header().Set("Content-Type", "application/json")
@@ -2315,8 +2466,8 @@ func (w *Watchdog) handleShutdown(rw http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(rw).Encode(map[string]string{"status": "shutting_down"})
 
 	go func() {
-		time.Sleep(500 * time.Millisecond)
-		close(w.shutdownCh)
+		time.Sleep(500 * time.Millisecond) // let the response reach the browser
+		w.requestShutdown()
 	}()
 }
 
@@ -2509,19 +2660,16 @@ func (w *Watchdog) handleConfigImport(rw http.ResponseWriter, r *http.Request) {
 func (w *Watchdog) handleSettings(rw http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		w.mu.RLock()
-		defer w.mu.RUnlock()
 		rw.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(rw).Encode(map[string]interface{}{
-			"log_dir":     w.config.LogDir,
-			"reboot_time": w.config.RebootTime,
-			"reboot_days": w.config.RebootDays,
-		})
+		json.NewEncoder(rw).Encode(w.settingsView())
 	case http.MethodPut:
 		var payload struct {
 			LogDir     string   `json:"log_dir"`
 			RebootTime string   `json:"reboot_time"`
 			RebootDays []string `json:"reboot_days"`
+			// AutoStart is Windows logon autostart, which lives in the registry
+			// rather than in config.json. Absent = leave it alone.
+			AutoStart *bool `json:"autostart"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 			http.Error(rw, err.Error(), http.StatusBadRequest)
@@ -2533,6 +2681,13 @@ func (w *Watchdog) handleSettings(rw http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+		if payload.AutoStart != nil {
+			if err := setAutoStart(*payload.AutoStart); err != nil {
+				http.Error(rw, "autostart: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+			log.Printf("Windows autostart %s", map[bool]string{true: "enabled", false: "disabled"}[*payload.AutoStart])
+		}
 		w.mu.Lock()
 		w.config.LogDir = payload.LogDir
 		w.config.RebootTime = payload.RebootTime
@@ -2541,7 +2696,7 @@ func (w *Watchdog) handleSettings(rw http.ResponseWriter, r *http.Request) {
 		w.mu.Unlock()
 
 		rw.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(rw).Encode(map[string]string{"status": "ok"})
+		json.NewEncoder(rw).Encode(w.settingsView())
 	default:
 		http.Error(rw, "method not allowed", http.StatusMethodNotAllowed)
 	}
@@ -2749,6 +2904,16 @@ func (w *Watchdog) apiAppRouter(rw http.ResponseWriter, r *http.Request) {
 // ---------------------------------------------------------------------------
 
 func main() {
+	// --wait-pid=N is set when we relaunch ourselves (tray > "restart"): wait for
+	// the previous instance to exit so it can release the port and its apps.
+	for _, arg := range os.Args[1:] {
+		if v, ok := strings.CutPrefix(arg, "--wait-pid="); ok {
+			if pid, err := strconv.Atoi(v); err == nil && pid > 0 {
+				waitForProcessExit(pid, 30*time.Second)
+			}
+		}
+	}
+
 	exePath, _ := os.Executable()
 	baseDir := filepath.Dir(exePath)
 
@@ -2783,6 +2948,21 @@ func main() {
 
 	if !wd.config.ShowConsole {
 		hideConsoleWindow()
+	}
+
+	// A second instance for the same config would fight the first one over the
+	// apps and the port. Treat launching it as "show me the dashboard" — which is
+	// what someone double-clicking watchdog.exe again actually wants.
+	if _, first := acquireSingleInstance(configPath); !first {
+		log.Printf("Another Watchdog is already running for this config; opening its Web UI instead")
+		if err := openURL(fmt.Sprintf("http://localhost:%d/", wd.webPort())); err != nil {
+			log.Printf("could not open the Web UI: %v", err)
+		}
+		return
+	}
+
+	if !wd.config.DisableTray {
+		go wd.runTray()
 	}
 
 	wd.startAll()

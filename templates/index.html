@@ -208,8 +208,9 @@
     .radios input[type="radio"] { width: 16px; height: 16px; accent-color: var(--accent); }
     fieldset { border: none; border-top: 1px solid var(--line); padding-top: 16px; margin-top: 6px; }
     fieldset > legend {
+      /* No uppercase here: it mangles mixed Japanese/Latin labels. */
       font-size: 12px; font-weight: 700; color: var(--accent);
-      text-transform: uppercase; letter-spacing: .6px; padding-bottom: 10px;
+      letter-spacing: .4px; padding-bottom: 10px;
     }
     .chips { display: flex; gap: 6px; flex-wrap: wrap; }
     .chip {
@@ -339,6 +340,19 @@
       </summary>
       <div class="panel-body">
         <fieldset style="border-top:none;padding-top:0">
+          <legend data-i18n="settings.startup_legend">Watchdogの自動起動</legend>
+          <div class="field">
+            <div class="check">
+              <input type="checkbox" id="f-autostart-win" onchange="saveAutoStart(this)">
+              <span class="txt">
+                <span data-i18n="settings.autostart">Windowsにサインインしたら自動でWatchdogを起動する</span>
+                <span class="hint" id="autostart-path"></span>
+              </span>
+            </div>
+            <div class="hint" data-i18n="settings.autostart_hint">現在のユーザーのログオン時に起動します（レジストリのRunに登録）。タスクトレイのメニューからも切り替えられます。</div>
+          </div>
+        </fieldset>
+        <fieldset>
           <legend data-i18n="settings.reboot_legend">PCの定時再起動</legend>
           <div class="row">
             <div class="field">
@@ -722,6 +736,13 @@
         'log.empty': 'ログはまだありません。',
         'settings.title': '全体設定',
         'settings.sub': 'PC再起動 / ログ保存先 / 設定のバックアップ',
+        'settings.startup_legend': 'Watchdogの自動起動',
+        'settings.autostart': 'Windowsにサインインしたら自動でWatchdogを起動する',
+        'settings.autostart_hint': '現在のユーザーのログオン時に起動します（レジストリのRunに登録）。タスクトレイのメニューからも切り替えられます。',
+        'settings.autostart_on': '登録済み: %s',
+        'settings.autostart_other': '別の場所のwatchdog.exeが登録されています: %s',
+        'settings.autostart_saved': '自動起動を有効にしました。',
+        'settings.autostart_off_saved': '自動起動を無効にしました。',
         'settings.reboot_legend': 'PCの定時再起動',
         'settings.reboot_time': '再起動する時刻',
         'settings.reboot_time_hint': '空欄なら再起動しません。全アプリを停止してからPCを再起動します。',
@@ -918,6 +939,13 @@
         'log.empty': 'No log entries yet.',
         'settings.title': 'Global settings',
         'settings.sub': 'PC reboot / log folder / config backup',
+        'settings.startup_legend': 'Watchdog autostart',
+        'settings.autostart': 'Start Watchdog automatically when Windows signs in',
+        'settings.autostart_hint': 'Runs at logon for the current user (registered in the registry Run key). The tray menu can toggle it too.',
+        'settings.autostart_on': 'registered: %s',
+        'settings.autostart_other': 'a different watchdog.exe is registered: %s',
+        'settings.autostart_saved': 'Autostart enabled.',
+        'settings.autostart_off_saved': 'Autostart disabled.',
         'settings.reboot_legend': 'Scheduled PC reboot',
         'settings.reboot_time': 'Reboot at',
         'settings.reboot_time_hint': 'Empty = no reboot. All apps are stopped before the PC reboots.',
@@ -1353,6 +1381,15 @@
         }
         settingsLoaded = true;
       }
+
+      // Autostart lives in the registry, so it can change outside this page
+      // (the tray menu toggles it too) — keep it in sync on every poll.
+      const cb = $('#f-autostart-win');
+      if (document.activeElement !== cb) cb.checked = !!settings.autostart;
+      const cmd = settings.autostart_command || '';
+      $('#autostart-path').textContent = settings.autostart
+        ? t('settings.autostart_on', cmd)
+        : (cmd ? t('settings.autostart_other', cmd) : '');
       const hdr = $('#header-reboot');
       if (settings.reboot_time) {
         hdr.textContent = t('reboot.prefix') + settings.reboot_time + ' (' + dayLabels(settings.reboot_days) + ')';
@@ -1668,6 +1705,38 @@
         } catch (e) { toast(t('msg.failed') + e, 'err'); }
       });
       await fetchStatus();
+    }
+
+    // The Run-key entry is applied immediately; the rest of the panel is sent
+    // along because the endpoint writes those fields as a set.
+    async function saveAutoStart(cb) {
+      const want = cb.checked;
+      cb.disabled = true;
+      try {
+        const res = await fetch('/api/settings', {
+          method: 'PUT',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({
+            log_dir: $('#f-log-dir').value.trim(),
+            reboot_time: $('#f-reboot-time').value.trim(),
+            reboot_days: getChips('#reboot-days'),
+            autostart: want
+          })
+        });
+        if (!res.ok) {
+          toast(t('msg.failed') + await res.text(), 'err');
+          cb.checked = !want;
+          return;
+        }
+        toast(want ? t('settings.autostart_saved') : t('settings.autostart_off_saved'), 'ok');
+        settingsLoaded = false;
+        await fetchStatus();
+      } catch (e) {
+        toast(t('msg.failed') + e, 'err');
+        cb.checked = !want;
+      } finally {
+        cb.disabled = false;
+      }
     }
 
     function exportConfig() {
