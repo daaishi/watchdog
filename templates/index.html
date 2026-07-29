@@ -371,6 +371,12 @@
         <fieldset>
           <legend data-i18n="notify.legend">問題発生時のSlack通知</legend>
           <div class="field">
+            <label for="f-site-name" data-i18n="notify.site_name">通知タイトル（案件名・現場名）</label>
+            <input type="text" id="f-site-name" data-i18n-ph="ph.site_name" placeholder="例: ○○ホール LED" oninput="updateNotifyPreview()">
+            <div class="hint" data-i18n="notify.site_name_hint">通知の1行目に太字で入ります。1つのチャンネルで複数現場を受けても、どの案件かすぐ分かります。</div>
+            <div class="method-note" id="notify-preview"></div>
+          </div>
+          <div class="field">
             <label for="f-slack-url" data-i18n="notify.webhook">Slack Incoming Webhook URL</label>
             <div class="with-btn">
               <input type="password" id="f-slack-url" data-i18n-ph="ph.slack_url" placeholder="https://hooks.slack.com/services/...">
@@ -378,16 +384,10 @@
             </div>
             <div class="hint" id="slack-state"></div>
           </div>
-          <div class="row">
-            <div class="field">
-              <label for="f-site-name" data-i18n="notify.site_name">現場名（通知の先頭に付きます）</label>
-              <input type="text" id="f-site-name" data-i18n-ph="ph.site_name" placeholder="例: ○○LED">
-            </div>
-            <div class="field">
-              <label for="f-notify-interval" data-i18n="notify.interval">同じ通知を抑制する間隔（分）</label>
-              <input type="number" id="f-notify-interval" min="1" value="5">
-              <div class="hint" data-i18n="notify.interval_hint">再起動ループでSlackが埋まらないようにします。省略した件数は次の通知に含まれます。</div>
-            </div>
+          <div class="field">
+            <label for="f-notify-interval" data-i18n="notify.interval">同じ通知を抑制する間隔（分）</label>
+            <input type="number" id="f-notify-interval" min="1" value="5">
+            <div class="hint" data-i18n="notify.interval_hint">再起動ループでSlackが埋まらないようにします。省略した件数は次の通知に含まれます。</div>
           </div>
           <div class="field">
             <span class="field-label" data-i18n="notify.events">通知する内容</span>
@@ -788,7 +788,10 @@
         'notify.clear': '削除',
         'notify.state_off': '未設定。SlackアプリでIncoming Webhookを作成し、URLを貼り付けて「設定を保存」してください。',
         'notify.state_on': '設定済み（%s）。変更する場合のみ新しいURLを入力してください。',
-        'notify.site_name': '現場名（通知の先頭に付きます）',
+        'notify.site_name': '通知タイトル（案件名・現場名）',
+        'notify.site_name_hint': '通知の1行目に太字で入ります。1つのチャンネルで複数現場を受けても、どの案件かすぐ分かります。',
+        'notify.preview_sample': '<b>アプリ名</b> が応答しないため再起動します',
+        'notify.preview_none': '↑ タイトル未設定。ホスト名だけでは案件が判別できないため、入力を推奨します。',
         'notify.interval': '同じ通知を抑制する間隔（分）',
         'notify.interval_hint': '再起動ループでSlackが埋まらないようにします。省略した件数は次の通知に含まれます。',
         'notify.events': '通知する内容',
@@ -1014,7 +1017,10 @@
         'notify.clear': 'Remove',
         'notify.state_off': 'Not set. Create an Incoming Webhook in Slack, paste its URL and press "Save settings".',
         'notify.state_on': 'Configured (%s). Enter a new URL only if you want to change it.',
-        'notify.site_name': 'Site name (prefixes every message)',
+        'notify.site_name': 'Alert title (project or site name)',
+        'notify.site_name_hint': 'Becomes the bold first line of every message, so one channel can carry several installations and still be readable.',
+        'notify.preview_sample': '<b>app name</b> is not responding and will be restarted',
+        'notify.preview_none': '↑ No title set. A hostname alone does not say which job an alert is from.',
         'notify.interval': 'Quiet period for repeated alerts (minutes)',
         'notify.interval_hint': 'Keeps a restart loop from flooding Slack. Skipped messages are counted in the next one.',
         'notify.events': 'What to send',
@@ -1496,6 +1502,7 @@
           $('#f-notify-interval').value = Math.max(1, Math.round((n.min_interval_sec || 300) / 60));
         }
         notifyLoaded = true;
+        updateNotifyPreview();
       }
       const hdr = $('#header-reboot');
       if (settings.reboot_time) {
@@ -1864,6 +1871,17 @@
       await fetchStatus();
     }
 
+    // Shows how the first two lines of a Slack alert will look, so the effect of
+    // the title is visible while typing it.
+    function updateNotifyPreview() {
+      const title = $('#f-site-name').value.trim();
+      const el = $('#notify-preview');
+      const sample = t('notify.preview_sample');
+      el.innerHTML = title
+        ? '<b>' + esc(title) + '</b><br>⚠ ' + sample
+        : '⚠ ' + sample + '<br><span style="color:var(--dimmer)">' + t('notify.preview_none') + '</span>';
+    }
+
     // Tests the URL in the field when there is one, so it can be checked before
     // saving; otherwise tests the stored one.
     async function testNotify(btn) {
@@ -1874,7 +1892,10 @@
         try {
           const res = await fetch('/api/notify/test', {
             method: 'POST', headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({slack_webhook_url: $('#f-slack-url').value.trim()})
+            body: JSON.stringify({
+              slack_webhook_url: $('#f-slack-url').value.trim(),
+              site_name: $('#f-site-name').value.trim()
+            })
           });
           const d = await res.json();
           el.style.color = d.ok ? 'var(--ok)' : 'var(--bad)';
@@ -2091,6 +2112,7 @@
 
       onMethodChange(); onStopModeChange(); updateTimeoutNote(); updateAutoStartNote(); onSchedModeChange();
       renderSummary(); renderCards(); renderCommands(); renderSettings(true);
+      updateNotifyPreview();
       updateClock();
     }
 

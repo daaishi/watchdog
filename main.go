@@ -2612,10 +2612,11 @@ func (w *Watchdog) handleNotifyTest(rw http.ResponseWriter, r *http.Request) {
 	}
 	var payload struct {
 		SlackWebhookURL string `json:"slack_webhook_url"`
+		SiteName        string `json:"site_name"`
 	}
-	json.NewDecoder(r.Body).Decode(&payload) // empty body = use the saved URL
+	json.NewDecoder(r.Body).Decode(&payload) // empty body = use the saved settings
 
-	err := w.sendTestNotification(strings.TrimSpace(payload.SlackWebhookURL))
+	err := w.sendTestNotification(strings.TrimSpace(payload.SlackWebhookURL), strings.TrimSpace(payload.SiteName))
 	rw.Header().Set("Content-Type", "application/json")
 	out := map[string]interface{}{"ok": err == nil}
 	if err != nil {

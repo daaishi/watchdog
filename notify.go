@@ -43,7 +43,9 @@ const (
 // NotifyConfig is the "notify" block of config.json.
 type NotifyConfig struct {
 	SlackWebhookURL string `json:"slack_webhook_url,omitempty"`
-	// SiteName prefixes every message, e.g. "[鹿児島LED]".
+	// SiteName is the title of every message — the project or site this
+	// installation belongs to. The hostname alone does not tell anyone which job
+	// an alert came from, so this is the line people actually read first.
 	SiteName string `json:"site_name,omitempty"`
 	// MinIntervalSec is the per-app, per-event quiet period. 0 = default.
 	MinIntervalSec int  `json:"min_interval_sec,omitempty"`
@@ -198,9 +200,16 @@ func (n *notifier) clearProblem(appID string) bool {
 
 var notifyClient = &http.Client{Timeout: 10 * time.Second}
 
-// postSlack delivers one message to an Incoming Webhook.
-func postSlack(webhookURL, text string) error {
-	body, err := json.Marshal(map[string]string{"text": text})
+// postSlack delivers one message to an Incoming Webhook. title, when set, is
+// also sent as the sender name: workspaces that allow webhooks to override it
+// then show which installation posted without anyone reading the message body.
+// Slack ignores the field where overrides are not permitted, so it is safe.
+func postSlack(webhookURL, text, title string) error {
+	payload := map[string]string{"text": text}
+	if title != "" {
+		payload["username"] = title
+	}
+	body, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
@@ -259,8 +268,10 @@ func (w *Watchdog) notifySend(ev notifyEvent, appID, headline, detail string, wa
 	}
 
 	var b strings.Builder
+	// The title goes on its own bold line: in a channel that receives several
+	// installations, that is what makes an alert identifiable at a glance.
 	if cfg.SiteName != "" {
-		fmt.Fprintf(&b, "[%s] ", cfg.SiteName)
+		fmt.Fprintf(&b, "*%s*\n", cfg.SiteName)
 	}
 	fmt.Fprintf(&b, "%s %s", notifyIcons[ev], headline)
 	if detail != "" {
@@ -274,7 +285,7 @@ func (w *Watchdog) notifySend(ev notifyEvent, appID, headline, detail string, wa
 
 	text := b.String()
 	send := func() {
-		if err := postSlack(cfg.SlackWebhookURL, text); err != nil {
+		if err := postSlack(cfg.SlackWebhookURL, text, cfg.SiteName); err != nil {
 			// Never log the URL itself — it is a secret.
 			log.Printf("[notify] Slack send failed (%s): %v", ev, err)
 		}
@@ -303,9 +314,10 @@ func (w *Watchdog) notifyRecovered(appID, name string) {
 		"直前の異常から復旧しました。")
 }
 
-// sendTestNotification posts a sample message, using the supplied webhook URL or
-// the saved one. Used by the "test" button in the Web UI.
-func (w *Watchdog) sendTestNotification(webhookURL string) error {
+// sendTestNotification posts a sample message, using the supplied webhook URL and
+// title or the saved ones. Used by the "test" button in the Web UI, which passes
+// what is currently typed in the form so it can be checked before saving.
+func (w *Watchdog) sendTestNotification(webhookURL, title string) error {
 	cfg := w.notifyConfig()
 	if webhookURL == "" {
 		webhookURL = cfg.SlackWebhookURL
@@ -313,14 +325,22 @@ func (w *Watchdog) sendTestNotification(webhookURL string) error {
 	if webhookURL == "" {
 		return fmt.Errorf("Webhook URL が設定されていません")
 	}
-	host, _ := os.Hostname()
-	prefix := ""
-	if cfg.SiteName != "" {
-		prefix = "[" + cfg.SiteName + "] "
+	if title == "" {
+		title = cfg.SiteName
 	}
-	return postSlack(webhookURL, fmt.Sprintf(
-		"%s:white_check_mark: Watchdog のテスト通知です\n通知はこの形式で届きます。\n_Watchdog %s / %s / %s_",
-		prefix, Version, host, time.Now().Format("2006-01-02 15:04:05")))
+	host, _ := os.Hostname()
+
+	var b strings.Builder
+	if title != "" {
+		fmt.Fprintf(&b, "*%s*\n", title)
+	}
+	fmt.Fprintf(&b, ":white_check_mark: Watchdog のテスト通知です\n通知はこの形式で届きます。")
+	if title == "" {
+		fmt.Fprintf(&b, "\n（通知タイトルが未設定です。設定するとこの上に案件名が入ります）")
+	}
+	fmt.Fprintf(&b, "\n_Watchdog %s / %s / %s_", Version, host, time.Now().Format("2006-01-02 15:04:05"))
+
+	return postSlack(webhookURL, b.String(), title)
 }
 
 // maskWebhook renders a webhook URL safe to show in the UI: enough to recognise
