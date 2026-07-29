@@ -23,6 +23,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 	"unsafe"
@@ -414,6 +415,9 @@ type Config struct {
 	RebootDays  []string        `json:"reboot_days,omitempty"`
 	Apps        []AppConfig     `json:"apps"`
 	Commands    []CommandConfig `json:"commands,omitempty"`
+	// Notify is Slack alerting. Absent means "use the recommended defaults", so
+	// an existing install only has to paste a webhook URL to start getting them.
+	Notify *NotifyConfig `json:"notify,omitempty"`
 }
 
 // ---------------------------------------------------------------------------
@@ -463,6 +467,9 @@ type Watchdog struct {
 	logWriter    *dateRotatingWriter
 	shutdownCh   chan struct{}
 	shutdownOnce sync.Once
+	notifier     *notifier
+	// notifyCfg is an atomic snapshot of config.Notify — see notifyConfig().
+	notifyCfg atomic.Pointer[NotifyConfig]
 }
 
 // requestShutdown starts an orderly shutdown. Safe to call more than once and
@@ -476,6 +483,7 @@ func NewWatchdog(configPath string) (*Watchdog, error) {
 		configPath: configPath,
 		apps:       make(map[string]*WatchedApp),
 		shutdownCh: make(chan struct{}),
+		notifier:   newNotifier(),
 	}
 	if err := w.loadConfig(); err != nil {
 		return nil, fmt.Errorf("load config: %w", err)
@@ -499,6 +507,7 @@ func (w *Watchdog) loadConfig() error {
 		return err
 	}
 	w.config = cfg
+	w.setNotifyConfig(cfg.Notify)
 	return nil
 }
 
@@ -1174,6 +1183,9 @@ func (w *Watchdog) startApp(wa *WatchedApp) error {
 	pid, err := launchApp(cfg, w.config.ShowConsole)
 	if err != nil {
 		wa.Status = StatusStopped
+		w.notifyProblem(evLaunchError, cfg.ID,
+			fmt.Sprintf("*%s* を起動できませんでした", cfg.Name),
+			fmt.Sprintf("%v\n対象: %s", err, cfg.ExePath))
 		return fmt.Errorf("launch %s: %w", cfg.ID, err)
 	}
 
@@ -1236,9 +1248,15 @@ func (w *Watchdog) killAndRestart(wa *WatchedApp) {
 	wa.Status = StatusStopped
 	wa.PID = 0
 	wa.restarts++
+	restarts := wa.restarts
 	wa.lastRestart = time.Now()
 	wa.restartDeferLogged = false
 	wa.mu.Unlock()
+
+	w.notifyProblem(evRestart, wa.Config.ID,
+		fmt.Sprintf("*%s* が応答しないため再起動します", wa.Config.Name),
+		fmt.Sprintf("%d秒間応答がありませんでした（連続 %d 回目の自動再起動）",
+			wa.Config.TimeoutSec, restarts))
 
 	if pid > 0 {
 		log.Printf("[%s] Killing PID %d ...", wa.Config.ID, pid)
@@ -1638,6 +1656,8 @@ func (w *Watchdog) watchTimeout(wa *WatchedApp) {
 					wa.restarts = 0
 				}
 				wa.mu.Unlock()
+				// Close out any alert we sent about this app.
+				w.notifyRecovered(wa.Config.ID, wa.Config.Name)
 				continue
 			}
 
@@ -1655,6 +1675,10 @@ func (w *Watchdog) watchTimeout(wa *WatchedApp) {
 				if logDeferred {
 					log.Printf("[%s] Heartbeat timeout (%ds), but %d restart(s) did not help; waiting %s before retrying",
 						wa.Config.ID, timeout, restarts, backoff)
+					w.notifyProblem(evStuck, wa.Config.ID,
+						fmt.Sprintf("*%s* が再起動しても復旧していません", wa.Config.Name),
+						fmt.Sprintf("自動再起動を %d 回試しましたが応答がありません。次の試行まで %s 待機します。\nログとアプリの状態を確認してください。",
+							restarts, backoff))
 				}
 				continue
 			}
@@ -1708,11 +1732,18 @@ func (w *Watchdog) watchSchedule(wa *WatchedApp) {
 				wa.Status = StatusStopped
 				wa.PID = 0
 				wa.mu.Unlock()
+				w.notify(evSchedule, wa.Config.ID,
+					fmt.Sprintf("*%s* を稼働時間の終了で停止します", wa.Config.Name),
+					fmt.Sprintf("稼働時間 %s-%s / 停止方法: %s",
+						sched.StartTime, sched.StopTime, stopModeLabel(wa.Config.StopMode)))
 				stopProcess(wa.Config, pid)
 				scheduledStop = true
 			} else if inSched && scheduledStop {
 				log.Printf("[%s] Inside schedule (%s-%s), starting",
 					wa.Config.ID, sched.StartTime, sched.StopTime)
+				w.notify(evSchedule, wa.Config.ID,
+					fmt.Sprintf("*%s* を稼働時間の開始で起動します", wa.Config.Name),
+					fmt.Sprintf("稼働時間 %s-%s", sched.StartTime, sched.StopTime))
 				if err := w.startApp(wa); err != nil {
 					log.Printf("[%s] Schedule restart failed: %v", wa.Config.ID, err)
 				}
@@ -2277,6 +2308,27 @@ func (w *Watchdog) settingsView() map[string]interface{} {
 	autoStart, registered := autoStartState()
 	w.mu.RLock()
 	defer w.mu.RUnlock()
+
+	nc := defaultNotifyConfig()
+	if w.config.Notify != nil {
+		nc = *w.config.Notify
+	}
+	// The webhook URL is a credential: report that one is set and enough of it to
+	// recognise, never the whole thing.
+	notify := map[string]interface{}{
+		"slack_configured":     nc.SlackWebhookURL != "",
+		"slack_webhook_masked": maskWebhook(nc.SlackWebhookURL),
+		"site_name":            nc.SiteName,
+		"min_interval_sec":     int(nc.interval() / time.Second),
+		"on_restart":           nc.OnRestart,
+		"on_stuck":             nc.OnStuck,
+		"on_launch_error":      nc.OnLaunchError,
+		"on_recovered":         nc.OnRecovered,
+		"on_watchdog_life":     nc.OnWatchdogLife,
+		"on_schedule":          nc.OnSchedule,
+		"on_reboot":            nc.OnReboot,
+	}
+
 	return map[string]interface{}{
 		"log_dir":           w.config.LogDir,
 		"reboot_time":       w.config.RebootTime,
@@ -2285,6 +2337,7 @@ func (w *Watchdog) settingsView() map[string]interface{} {
 		"tray":              !w.config.DisableTray,
 		"autostart":         autoStart,
 		"autostart_command": registered,
+		"notify":            notify,
 	}
 }
 
@@ -2549,6 +2602,31 @@ func (w *Watchdog) handleLogs(rw http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(rw).Encode(out)
 }
 
+// handleNotifyTest posts a sample Slack message so the operator can confirm the
+// webhook works from this machine before trusting it with alerts. An unsaved URL
+// may be supplied in the body to test before saving.
+func (w *Watchdog) handleNotifyTest(rw http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(rw, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var payload struct {
+		SlackWebhookURL string `json:"slack_webhook_url"`
+	}
+	json.NewDecoder(r.Body).Decode(&payload) // empty body = use the saved URL
+
+	err := w.sendTestNotification(strings.TrimSpace(payload.SlackWebhookURL))
+	rw.Header().Set("Content-Type", "application/json")
+	out := map[string]interface{}{"ok": err == nil}
+	if err != nil {
+		out["error"] = err.Error()
+		log.Printf("[notify] test send failed: %v", err)
+	} else {
+		log.Printf("[notify] test message sent")
+	}
+	json.NewEncoder(rw).Encode(out)
+}
+
 // validateConfig performs sanity checks on a config before it is accepted
 // (used by the import endpoint).
 func validateConfig(c *Config) error {
@@ -2639,6 +2717,7 @@ func (w *Watchdog) handleConfigImport(rw http.ResponseWriter, r *http.Request) {
 	w.mu.Lock()
 	prevPort := w.config.WebPort
 	w.config = newCfg
+	w.setNotifyConfig(newCfg.Notify)
 	saveErr := w.saveConfig()
 	w.mu.Unlock()
 	if saveErr != nil {
@@ -2670,6 +2749,21 @@ func (w *Watchdog) handleSettings(rw http.ResponseWriter, r *http.Request) {
 			// AutoStart is Windows logon autostart, which lives in the registry
 			// rather than in config.json. Absent = leave it alone.
 			AutoStart *bool `json:"autostart"`
+			// Notify absent = leave the whole block alone. Within it, a nil
+			// webhook URL keeps the stored one (the UI never sends it back,
+			// because it only ever receives a masked version); "" clears it.
+			Notify *struct {
+				SlackWebhookURL *string `json:"slack_webhook_url"`
+				SiteName        string  `json:"site_name"`
+				MinIntervalSec  int     `json:"min_interval_sec"`
+				OnRestart       bool    `json:"on_restart"`
+				OnStuck         bool    `json:"on_stuck"`
+				OnLaunchError   bool    `json:"on_launch_error"`
+				OnRecovered     bool    `json:"on_recovered"`
+				OnWatchdogLife  bool    `json:"on_watchdog_life"`
+				OnSchedule      bool    `json:"on_schedule"`
+				OnReboot        bool    `json:"on_reboot"`
+			} `json:"notify"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 			http.Error(rw, err.Error(), http.StatusBadRequest)
@@ -2692,6 +2786,26 @@ func (w *Watchdog) handleSettings(rw http.ResponseWriter, r *http.Request) {
 		w.config.LogDir = payload.LogDir
 		w.config.RebootTime = payload.RebootTime
 		w.config.RebootDays = payload.RebootDays
+		if p := payload.Notify; p != nil {
+			nc := defaultNotifyConfig()
+			if w.config.Notify != nil {
+				nc = *w.config.Notify
+			}
+			if p.SlackWebhookURL != nil {
+				nc.SlackWebhookURL = strings.TrimSpace(*p.SlackWebhookURL)
+			}
+			nc.SiteName = p.SiteName
+			nc.MinIntervalSec = p.MinIntervalSec
+			nc.OnRestart = p.OnRestart
+			nc.OnStuck = p.OnStuck
+			nc.OnLaunchError = p.OnLaunchError
+			nc.OnRecovered = p.OnRecovered
+			nc.OnWatchdogLife = p.OnWatchdogLife
+			nc.OnSchedule = p.OnSchedule
+			nc.OnReboot = p.OnReboot
+			w.config.Notify = &nc
+			w.setNotifyConfig(&nc)
+		}
 		w.saveConfig()
 		w.mu.Unlock()
 
@@ -2741,6 +2855,8 @@ func (w *Watchdog) watchReboot() {
 				}
 				triggered = true
 				log.Printf("[reboot] Reboot time reached. Stopping all apps ...")
+				w.notifySync(evReboot, "", "PCを再起動します",
+					fmt.Sprintf("設定された再起動時刻 %s になりました。全アプリを停止してから再起動します。", rebootTime))
 				w.stopAll()
 				log.Printf("[reboot] All apps stopped. Rebooting PC ...")
 				time.Sleep(2 * time.Second)
@@ -2970,6 +3086,8 @@ func main() {
 	}
 
 	wd.startAll()
+	wd.notify(evWatchdogLife, "", "Watchdogを起動しました",
+		fmt.Sprintf("監視対象 %d 件 / 管理画面 http://localhost:%d", len(wd.config.Apps), wd.webPort()))
 	go wd.watchReboot()
 	go wd.watchCommands()
 
@@ -2978,6 +3096,7 @@ func main() {
 	mux.HandleFunc("/api/status", wd.handleAPIStatus)
 	mux.HandleFunc("/api/logs", wd.handleLogs)
 	mux.HandleFunc("/api/settings", wd.handleSettings)
+	mux.HandleFunc("/api/notify/test", wd.handleNotifyTest)
 	mux.HandleFunc("/api/config/export", wd.handleConfigExport)
 	mux.HandleFunc("/api/config/import", wd.handleConfigImport)
 	mux.HandleFunc("/api/app", wd.apiAppRouter)
@@ -3000,6 +3119,8 @@ func main() {
 
 	<-wd.shutdownCh
 	log.Println("Shutting down ...")
+	// Sent synchronously: the process is about to exit.
+	wd.notifySync(evWatchdogLife, "", "Watchdogを終了します", "監視中のアプリも停止します。")
 	wd.stopAll()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

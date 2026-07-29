@@ -369,6 +369,42 @@
           </div>
         </fieldset>
         <fieldset>
+          <legend data-i18n="notify.legend">問題発生時のSlack通知</legend>
+          <div class="field">
+            <label for="f-slack-url" data-i18n="notify.webhook">Slack Incoming Webhook URL</label>
+            <div class="with-btn">
+              <input type="password" id="f-slack-url" data-i18n-ph="ph.slack_url" placeholder="https://hooks.slack.com/services/...">
+              <button type="button" class="btn btn-ghost" data-i18n="notify.clear" onclick="clearSlackWebhook(this)">削除</button>
+            </div>
+            <div class="hint" id="slack-state"></div>
+          </div>
+          <div class="row">
+            <div class="field">
+              <label for="f-site-name" data-i18n="notify.site_name">現場名（通知の先頭に付きます）</label>
+              <input type="text" id="f-site-name" data-i18n-ph="ph.site_name" placeholder="例: ○○LED">
+            </div>
+            <div class="field">
+              <label for="f-notify-interval" data-i18n="notify.interval">同じ通知を抑制する間隔（分）</label>
+              <input type="number" id="f-notify-interval" min="1" value="5">
+              <div class="hint" data-i18n="notify.interval_hint">再起動ループでSlackが埋まらないようにします。省略した件数は次の通知に含まれます。</div>
+            </div>
+          </div>
+          <div class="field">
+            <span class="field-label" data-i18n="notify.events">通知する内容</span>
+            <div class="check"><input type="checkbox" id="f-n-restart"><span class="txt" data-i18n="notify.on_restart">異常を検知してアプリを再起動したとき</span></div>
+            <div class="check" style="margin-top:7px"><input type="checkbox" id="f-n-stuck"><span class="txt" data-i18n="notify.on_stuck">再起動しても復旧しないとき（重要）</span></div>
+            <div class="check" style="margin-top:7px"><input type="checkbox" id="f-n-launch"><span class="txt" data-i18n="notify.on_launch_error">アプリを起動できなかったとき</span></div>
+            <div class="check" style="margin-top:7px"><input type="checkbox" id="f-n-recovered"><span class="txt" data-i18n="notify.on_recovered">異常から復旧したとき</span></div>
+            <div class="check" style="margin-top:7px"><input type="checkbox" id="f-n-reboot"><span class="txt" data-i18n="notify.on_reboot">PCの定時再起動を実行するとき</span></div>
+            <div class="check" style="margin-top:7px"><input type="checkbox" id="f-n-life"><span class="txt" data-i18n="notify.on_watchdog_life">Watchdog自体の起動・終了</span></div>
+            <div class="check" style="margin-top:7px"><input type="checkbox" id="f-n-schedule"><span class="txt" data-i18n="notify.on_schedule">稼働時間による起動・停止</span></div>
+          </div>
+          <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+            <button class="btn btn-ghost btn-sm" data-i18n="notify.test" onclick="testNotify(this)">テスト送信</button>
+            <span id="notify-result" class="mono" style="font-size:12px"></span>
+          </div>
+        </fieldset>
+        <fieldset>
           <legend data-i18n="settings.log_legend">ログ</legend>
           <div class="field">
             <label for="f-log-dir" data-i18n="settings.log_dir">ログの保存先フォルダ</label>
@@ -747,6 +783,26 @@
         'settings.reboot_time': '再起動する時刻',
         'settings.reboot_time_hint': '空欄なら再起動しません。全アプリを停止してからPCを再起動します。',
         'settings.reboot_days': '再起動する曜日',
+        'notify.legend': '問題発生時のSlack通知',
+        'notify.webhook': 'Slack Incoming Webhook URL',
+        'notify.clear': '削除',
+        'notify.state_off': '未設定。SlackアプリでIncoming Webhookを作成し、URLを貼り付けて「設定を保存」してください。',
+        'notify.state_on': '設定済み（%s）。変更する場合のみ新しいURLを入力してください。',
+        'notify.site_name': '現場名（通知の先頭に付きます）',
+        'notify.interval': '同じ通知を抑制する間隔（分）',
+        'notify.interval_hint': '再起動ループでSlackが埋まらないようにします。省略した件数は次の通知に含まれます。',
+        'notify.events': '通知する内容',
+        'notify.on_restart': '異常を検知してアプリを再起動したとき',
+        'notify.on_stuck': '再起動しても復旧しないとき（重要）',
+        'notify.on_launch_error': 'アプリを起動できなかったとき',
+        'notify.on_recovered': '異常から復旧したとき',
+        'notify.on_reboot': 'PCの定時再起動を実行するとき',
+        'notify.on_watchdog_life': 'Watchdog自体の起動・終了',
+        'notify.on_schedule': '稼働時間による起動・停止',
+        'notify.test': 'テスト送信',
+        'notify.sending': '送信中 ...',
+        'notify.sent': 'Slackに送信しました。チャンネルを確認してください。',
+        'notify.cleared': 'Webhook URLを削除しました。',
         'settings.log_legend': 'ログ',
         'settings.log_dir': 'ログの保存先フォルダ',
         'settings.log_dir_hint': 'exeからの相対パス、または絶対パス。日付ごとにファイルが分かれます。',
@@ -785,6 +841,7 @@
         'form.file_path': '監視するファイル',
         'form.timeout': '応答が途絶えたと判断する秒数',
         'form.timeout_note': '%s秒 応答がないと、プロセスを終了して自動的に起動し直します。',
+        'form.timeout_too_short': '生存確認は5秒ごとに行うため、<strong>10秒以上</strong>にしてください。短すぎると正常なアプリを落ちたと誤検知します（推奨: 30秒）。',
         'form.autostart': 'Watchdogがこのアプリを起動する',
         'form.autostart_on': 'OFFにすると、すでに動いているアプリを監視するだけになります。',
         'form.autostart_off': '現在OFF：起動はせず、動いているアプリを見つけて監視します。',
@@ -879,7 +936,9 @@
         'ph.cmd_payload': '送信する文字列、またはHEXバイト',
         'ph.cmd_port': 'PJLINKなら4352',
         'ph.pj_pass': '認証なしなら空欄',
-        'ph.osc_quit': '空欄なら保存後にプロセスを終了'
+        'ph.osc_quit': '空欄なら保存後にプロセスを終了',
+        'ph.slack_url': 'https://hooks.slack.com/services/...',
+        'ph.site_name': '例: ○○LED'
       },
       en: {
         'ui.shutdown': 'Shut down Watchdog',
@@ -950,6 +1009,26 @@
         'settings.reboot_time': 'Reboot at',
         'settings.reboot_time_hint': 'Empty = no reboot. All apps are stopped before the PC reboots.',
         'settings.reboot_days': 'Reboot on',
+        'notify.legend': 'Slack alerts on problems',
+        'notify.webhook': 'Slack Incoming Webhook URL',
+        'notify.clear': 'Remove',
+        'notify.state_off': 'Not set. Create an Incoming Webhook in Slack, paste its URL and press "Save settings".',
+        'notify.state_on': 'Configured (%s). Enter a new URL only if you want to change it.',
+        'notify.site_name': 'Site name (prefixes every message)',
+        'notify.interval': 'Quiet period for repeated alerts (minutes)',
+        'notify.interval_hint': 'Keeps a restart loop from flooding Slack. Skipped messages are counted in the next one.',
+        'notify.events': 'What to send',
+        'notify.on_restart': 'An app was restarted after a problem',
+        'notify.on_stuck': 'Restarting is not fixing it (important)',
+        'notify.on_launch_error': 'An app could not be launched',
+        'notify.on_recovered': 'An app recovered',
+        'notify.on_reboot': 'The scheduled PC reboot runs',
+        'notify.on_watchdog_life': 'Watchdog itself starts or stops',
+        'notify.on_schedule': 'Scheduled start and stop',
+        'notify.test': 'Send test',
+        'notify.sending': 'sending ...',
+        'notify.sent': 'Sent to Slack — check the channel.',
+        'notify.cleared': 'Webhook URL removed.',
         'settings.log_legend': 'Logs',
         'settings.log_dir': 'Log folder',
         'settings.log_dir_hint': 'Relative to the exe, or an absolute path. One file per day.',
@@ -988,6 +1067,7 @@
         'form.file_path': 'File to watch',
         'form.timeout': 'Seconds without a response before restarting',
         'form.timeout_note': 'After %ss with no response the process is killed and started again.',
+        'form.timeout_too_short': 'Liveness is polled every 5 seconds, so use <strong>10 seconds or more</strong>. Anything shorter reports healthy apps as dead (30s recommended).',
         'form.autostart': 'Watchdog launches this app',
         'form.autostart_on': 'Turn off to only monitor an app that is already running.',
         'form.autostart_off': 'Currently off: never launches, only finds and watches a running app.',
@@ -1082,7 +1162,9 @@
         'ph.cmd_payload': 'text to send, or HEX bytes',
         'ph.cmd_port': '4352 for PJLINK',
         'ph.pj_pass': 'blank if no auth',
-        'ph.osc_quit': 'blank = quit by process after saving'
+        'ph.osc_quit': 'blank = quit by process after saving',
+        'ph.slack_url': 'https://hooks.slack.com/services/...',
+        'ph.site_name': 'e.g. North Hall LED'
       }
     };
 
@@ -1105,7 +1187,7 @@
     let apps = [], commands = [], settings = null;
     let editingAppId = null, editingCmdId = null;
     let busy = 0;              // suppress re-render while an operation is running
-    let settingsLoaded = false;
+    let settingsLoaded = false, notifyLoaded = false;
 
     const $ = sel => document.querySelector(sel);
     const $$ = sel => Array.from(document.querySelectorAll(sel));
@@ -1390,6 +1472,31 @@
       $('#autostart-path').textContent = settings.autostart
         ? t('settings.autostart_on', cmd)
         : (cmd ? t('settings.autostart_other', cmd) : '');
+
+      // Slack notifications. The webhook URL field stays empty on purpose: the
+      // server only ever sends back a masked version, so an empty field means
+      // "keep what is stored".
+      const n = settings.notify || {};
+      $('#slack-state').textContent = n.slack_configured
+        ? t('notify.state_on', n.slack_webhook_masked || '')
+        : t('notify.state_off');
+      const notifyFields = [
+        ['#f-site-name', 'site_name'], ['#f-n-restart', 'on_restart'], ['#f-n-stuck', 'on_stuck'],
+        ['#f-n-launch', 'on_launch_error'], ['#f-n-recovered', 'on_recovered'],
+        ['#f-n-reboot', 'on_reboot'], ['#f-n-life', 'on_watchdog_life'], ['#f-n-schedule', 'on_schedule']
+      ];
+      if (!notifyLoaded || force) {
+        notifyFields.forEach(([sel, key]) => {
+          const el = $(sel);
+          if (document.activeElement === el) return;
+          if (el.type === 'checkbox') el.checked = !!n[key];
+          else el.value = n[key] || '';
+        });
+        if (document.activeElement !== $('#f-notify-interval')) {
+          $('#f-notify-interval').value = Math.max(1, Math.round((n.min_interval_sec || 300) / 60));
+        }
+        notifyLoaded = true;
+      }
       const hdr = $('#header-reboot');
       if (settings.reboot_time) {
         hdr.textContent = t('reboot.prefix') + settings.reboot_time + ' (' + dayLabels(settings.reboot_days) + ')';
@@ -1494,7 +1601,17 @@
     }
 
     function updateTimeoutNote() {
-      $('#timeout-note').textContent = t('form.timeout_note', $('#f-timeout').value || '0');
+      const v = parseInt($('#f-timeout').value) || 0;
+      const el = $('#timeout-note');
+      // Liveness is polled every 5 seconds, so a timeout close to that reports
+      // healthy apps as dead. Warn instead of letting the site find out.
+      if (v > 0 && v < 10) {
+        el.innerHTML = t('form.timeout_too_short');
+        el.style.color = 'var(--warn)';
+      } else {
+        el.textContent = t('form.timeout_note', v || '0');
+        el.style.color = '';
+      }
     }
 
     function updateAutoStartNote() {
@@ -1687,24 +1804,86 @@
     // =====================================================================
     // settings actions
     // =====================================================================
+    // notifyPayload mirrors the form. `slack_webhook_url` is omitted when the
+    // field is empty so the stored URL survives an ordinary save.
+    function notifyPayload(webhookOverride) {
+      const p = {
+        site_name: $('#f-site-name').value.trim(),
+        min_interval_sec: Math.max(60, (parseInt($('#f-notify-interval').value) || 5) * 60),
+        on_restart: $('#f-n-restart').checked,
+        on_stuck: $('#f-n-stuck').checked,
+        on_launch_error: $('#f-n-launch').checked,
+        on_recovered: $('#f-n-recovered').checked,
+        on_watchdog_life: $('#f-n-life').checked,
+        on_schedule: $('#f-n-schedule').checked,
+        on_reboot: $('#f-n-reboot').checked
+      };
+      if (typeof webhookOverride === 'string') p.slack_webhook_url = webhookOverride;
+      else {
+        const url = $('#f-slack-url').value.trim();
+        if (url) p.slack_webhook_url = url;
+      }
+      return p;
+    }
+
+    async function putSettings(extra) {
+      const body = Object.assign({
+        log_dir: $('#f-log-dir').value.trim(),
+        reboot_time: $('#f-reboot-time').value.trim(),
+        reboot_days: getChips('#reboot-days'),
+        notify: notifyPayload()
+      }, extra || {});
+      return fetch('/api/settings', {
+        method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)
+      });
+    }
+
     async function saveSettings(btn) {
       await withBusy(btn, t('settings.save'), async () => {
         try {
-          const res = await fetch('/api/settings', {
-            method: 'PUT',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({
-              log_dir: $('#f-log-dir').value.trim(),
-              reboot_time: $('#f-reboot-time').value.trim(),
-              reboot_days: getChips('#reboot-days')
-            })
-          });
+          const res = await putSettings();
           if (!res.ok) { toast(t('msg.failed') + await res.text(), 'err'); return; }
           toast(t('settings.saved'), 'ok');
-          settingsLoaded = false;
+          $('#f-slack-url').value = '';   // stored now; keep the secret off screen
+          settingsLoaded = false; notifyLoaded = false;
         } catch (e) { toast(t('msg.failed') + e, 'err'); }
       });
       await fetchStatus();
+    }
+
+    async function clearSlackWebhook(btn) {
+      await withBusy(btn, t('notify.clear'), async () => {
+        try {
+          const res = await putSettings({notify: notifyPayload('')});
+          if (!res.ok) { toast(t('msg.failed') + await res.text(), 'err'); return; }
+          $('#f-slack-url').value = '';
+          toast(t('notify.cleared'), 'ok');
+          settingsLoaded = false; notifyLoaded = false;
+        } catch (e) { toast(t('msg.failed') + e, 'err'); }
+      });
+      await fetchStatus();
+    }
+
+    // Tests the URL in the field when there is one, so it can be checked before
+    // saving; otherwise tests the stored one.
+    async function testNotify(btn) {
+      const el = $('#notify-result');
+      el.style.color = 'var(--dim)';
+      el.textContent = t('notify.sending');
+      await withBusy(btn, t('notify.test'), async () => {
+        try {
+          const res = await fetch('/api/notify/test', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({slack_webhook_url: $('#f-slack-url').value.trim()})
+          });
+          const d = await res.json();
+          el.style.color = d.ok ? 'var(--ok)' : 'var(--bad)';
+          el.textContent = (d.ok ? '✓ ' + t('notify.sent') : '✗ ' + (d.error || 'failed'));
+        } catch (e) {
+          el.style.color = 'var(--bad)';
+          el.textContent = '✗ ' + e;
+        }
+      });
     }
 
     // The Run-key entry is applied immediately; the rest of the panel is sent
@@ -1713,16 +1892,7 @@
       const want = cb.checked;
       cb.disabled = true;
       try {
-        const res = await fetch('/api/settings', {
-          method: 'PUT',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({
-            log_dir: $('#f-log-dir').value.trim(),
-            reboot_time: $('#f-reboot-time').value.trim(),
-            reboot_days: getChips('#reboot-days'),
-            autostart: want
-          })
-        });
+        const res = await putSettings({autostart: want});
         if (!res.ok) {
           toast(t('msg.failed') + await res.text(), 'err');
           cb.checked = !want;

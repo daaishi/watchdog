@@ -5,5 +5,17 @@
   "reboot_time": "",
   "reboot_days": [],
   "apps": [],
-  "commands": []
+  "commands": [],
+  "notify": {
+    "slack_webhook_url": "",
+    "site_name": "",
+    "min_interval_sec": 300,
+    "on_restart": true,
+    "on_stuck": true,
+    "on_launch_error": true,
+    "on_recovered": true,
+    "on_watchdog_life": false,
+    "on_schedule": false,
+    "on_reboot": true
+  }
 }
