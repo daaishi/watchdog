@@ -2945,6 +2945,10 @@ func main() {
 	defer logWriter.Close()
 	wd.logWriter = logWriter
 	log.SetOutput(logWriter)
+	// Repeat these into the file: the lines above went to stderr, which nobody
+	// sees when Watchdog runs without a console — and the first question about a
+	// site problem is always "which version is running?".
+	log.Printf("Watchdog %s starting (config: %s)", Version, configPath)
 
 	if !wd.config.ShowConsole {
 		hideConsoleWindow()
